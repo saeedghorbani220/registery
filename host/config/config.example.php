@@ -83,7 +83,7 @@ return [
     // Request limits (spec §10.6).
     'limits' => [
         'max_body_bytes' => 1048576,        // every route except import
-        'max_import_body_bytes' => 16777216, // POST /bootstrap/import
+        'max_import_body_bytes' => 16777216, // bootstrap + legacy migration analyze
         'max_operations' => 500,            // operations in one push
         'max_import_rows' => 100000,        // rows in one import
         'default_changes_limit' => 500,
