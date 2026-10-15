@@ -50,6 +50,7 @@ final class Schema
     public const E_INVALID_LEGACY_ID = 'INVALID_LEGACY_ID';
     public const E_INVALID_JSON    = 'INVALID_JSON';
     public const E_EMPTY_REFERENCE = 'EMPTY_REFERENCE';
+    public const E_OUT_OF_RANGE    = 'OUT_OF_RANGE';
 
     /** @var array<string, array<string, mixed>>|null */
     private static ?array $schema = null;
@@ -398,7 +399,8 @@ final class Schema
                     'business_phone'            => ['sql' => 'varchar(80)', 'type' => 'varchar',
                                                     'nullable' => false, 'default' => ''],
                     'watch_interval_hours'      => ['sql' => 'int', 'type' => 'int',
-                                                    'nullable' => false, 'default' => 2],
+                                                    'nullable' => false, 'default' => 2,
+                                                    'min' => 1, 'max' => 72],
                     'scheduler_enabled'         => ['sql' => 'tinyint(1)', 'type' => 'tinyint',
                                                     'nullable' => false, 'default' => 1,
                                                     'enum' => [0, 1]],
@@ -944,6 +946,10 @@ final class Schema
                 if ($check['enum'] !== null && !in_array($value, $check['enum'], true)) {
                     return [self::failure(self::E_ENUM_MISMATCH, $table, $column)];
                 }
+                if (($check['min'] !== null && $value < $check['min'])
+                    || ($check['max'] !== null && $value > $check['max'])) {
+                    return [self::failure(self::E_OUT_OF_RANGE, $table, $column)];
+                }
                 return [];
 
             case 'datetime':
@@ -1037,6 +1043,7 @@ final class Schema
         $raw += [
             'type' => 'varchar', 'nullable' => false, 'default' => null,
             'enum' => null, 'format' => null, 'ref' => null, 'auto' => false,
+            'min' => null, 'max' => null,
         ];
         // Required <=> NOT NULL with no default and not server-generated:
         // derived so it cannot drift from the SQL it describes. An

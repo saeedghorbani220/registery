@@ -73,13 +73,45 @@ final class Config
         if (!is_string($source) || $source === '') {
             return $default;
         }
-        $quoted = preg_quote($key, '/');
-        $pattern = '/[\'\"]' . $quoted . '[\'\"]\s*=>\s*(true|false)\b/i';
-        $matched = preg_match($pattern, $source, $match);
-        if ($matched !== 1 || !isset($match[1])) {
-            return $default;
+
+        // Parse PHP tokens rather than raw text. A commented-out "true" must
+        // never enable a security kill switch, and duplicate assignments are
+        // ambiguous, so they fail closed to the caller-supplied default.
+        $tokens = token_get_all($source);
+        $values = [];
+        $count = count($tokens);
+        $singleQuoted = "'" . $key . "'";
+        $doubleQuoted = '"' . $key . '"';
+        for ($i = 0; $i < $count; $i++) {
+            $token = $tokens[$i];
+            if (!is_array($token) || $token[0] !== T_CONSTANT_ENCAPSED_STRING
+                || ($token[1] !== $singleQuoted && $token[1] !== $doubleQuoted)) {
+                continue;
+            }
+
+            $j = $i + 1;
+            while ($j < $count && is_array($tokens[$j])
+                && in_array($tokens[$j][0], [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)) {
+                $j++;
+            }
+            if ($j >= $count || !is_array($tokens[$j])
+                || $tokens[$j][0] !== T_DOUBLE_ARROW) {
+                continue;
+            }
+            $j++;
+            while ($j < $count && is_array($tokens[$j])
+                && in_array($tokens[$j][0], [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)) {
+                $j++;
+            }
+            if ($j >= $count || !is_array($tokens[$j]) || $tokens[$j][0] !== T_STRING) {
+                continue;
+            }
+            $literal = strtolower((string) $tokens[$j][1]);
+            if ($literal === 'true' || $literal === 'false') {
+                $values[] = $literal === 'true';
+            }
         }
-        return strtolower((string) $match[1]) === 'true';
+        return count($values) === 1 ? $values[0] : $default;
     }
 
     public static function path(): string
