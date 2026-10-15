@@ -6,7 +6,8 @@ One class, :class:`SyncClient`, speaks the whole §6 contract over ``requests``:
 ===========  ==========================================================
 ``health``   ``GET  /health/live``            (no auth)
 ``login``    ``POST /auth/login``             -> user tokens, RAM only
-``enroll``   ``POST /sync-devices/enroll``    -> sync device id + refresh
+``enroll``   ``POST /sync-devices/self-enroll`` -> sync device id + refresh
+             (falls back to legacy ``/sync-devices/enroll`` on 404)
 ``bootstrap````GET  /sync/bootstrap``          -> snapshot + cursor + epoch
 ``pull``     ``GET  /sync/changes?cursor=&limit=``
 ``push``     ``POST /sync/mutations``          -> applied[] + conflicts[]
@@ -247,8 +248,6 @@ class SyncClient(object):
             self._log(route, method, 0, started, code="NET_TIMEOUT")
             raise RequestTimeoutError(route=route) from None
         except requests.RequestException:
-            # Connect, DNS, TLS, protocol errors: none of them produced a
-            # response, so there is no status and no request id to report.
             self._log(route, method, 0, started, code="NET_UNREACHABLE")
             raise UnreachableError(route=route) from None
 
@@ -297,9 +296,6 @@ class SyncClient(object):
         common = dict(route=route, status=status,
                       request_id=exchange["request_id"],
                       retry_after=exchange["retry_after"])
-        # 401 never reaches here (it goes through _auth_failure); 403 is
-        # "authenticated but not allowed" (spec §7 roles), a permission
-        # answer that must not look like a dead session.
         if exchange["malformed"] and not exchange["code"]:
             return BadResponseError(route=route, status=status,
                                     request_id=exchange["request_id"])
@@ -316,16 +312,10 @@ class SyncClient(object):
             if acting:
                 acting_token = self.vault.user_access_token
                 if not acting_token:
-                    # The acting identity lives in RAM only (spec §5), so an
-                    # expired or absent user session is answered *before* the
-                    # request is built: the host would answer 401 anyway, and
-                    # sending first would log a route for a call never made.
                     raise self._auth_failure(route, code=AUTH_REQUIRED)
         exchange = self._exchange(method, route, body, token, self._timeout,
                                   acting_token)
         if exchange["status"] == 401 and auth and allow_refresh:
-            # Spec §9: exactly one refresh, then retry the original request
-            # once. A second 401 stops here — no loop, no second refresh.
             self._refresh_device()
             token = self.vault.access_token
             exchange = self._exchange(method, route, body, token,
@@ -334,15 +324,10 @@ class SyncClient(object):
                 raise self._auth_failure(route, exchange)
         if not 200 <= int(exchange["status"] or 0) < 300:
             if exchange["status"] == 401:
-                # One place for "the session is dead", whether the 401 came
-                # from the first attempt or from the retry after a refresh —
-                # so on_auth_failed fires exactly once per request.
                 raise self._auth_failure(route, exchange)
             raise self._failure(exchange, route)
         payload = exchange["payload"]
         if not isinstance(payload, dict) or payload.get("ok") is not True:
-            # A 2xx that is not the documented envelope is a protocol fault,
-            # not a success: guessing would silently drop data (spec §6).
             raise BadResponseError(route=route,
                                    status=exchange["status"],
                                    request_id=exchange["request_id"])
@@ -363,22 +348,14 @@ class SyncClient(object):
             return token
         if not self.vault.has_device_credentials:
             if not self.config.sync_device_id:
-                # Never enrolled: the remedy is /sync-devices/enroll, not a
-                # refresh (spec §5), and the panel must say which.
+                # Never enrolled: the remedy is self-enrolment, not a refresh.
                 raise self._auth_failure("/sync/bootstrap",
                                          code=ENROL_REQUIRED)
             raise self._auth_failure("/auth/refresh")
         return self._refresh_device()
 
     def _auth_failure(self, route, exchange=None, code=None):
-        """Build the stop signal, after telling the state machine once.
-
-        ``fired`` records whether a wired ``on_auth_failed`` callback already
-        reported the fault, so a batch attempt still produces exactly one
-        terminal event (manager ruling 12). Only ``AUTH_*`` codes are
-        accepted here: anything else the server sent is folded into
-        ``AUTH_REQUIRED`` so the panel has one thing to translate (§11).
-        """
+        """Build the stop signal, after telling the state machine once."""
         candidate = code or (exchange or {}).get("code")
         if candidate != AUTH_REVOKED and candidate != ENROL_REQUIRED:
             candidate = AUTH_REQUIRED
@@ -392,11 +369,7 @@ class SyncClient(object):
                    request_id=request_id)
 
     def _refresh_device(self):
-        """Rotate the device pair. Returns the new access token.
-
-        Success is a successful authentication for the 7-day lease (manager
-        ruling 7), so ``on_auth_ok`` runs here and nowhere else.
-        """
+        """Rotate the device pair. Returns the new access token."""
         refresh_token = self.vault.device_refresh_token
         if not refresh_token:
             raise self._auth_failure("/auth/refresh")
@@ -405,8 +378,6 @@ class SyncClient(object):
                 "POST", "/auth/refresh", auth=False, allow_refresh=False,
                 body={"refresh_token": refresh_token, "kind": "device"})
         except AuthRequiredError:
-            # The refresh token itself was refused: reuse detection, expiry or
-            # a revoked device. Spec §5 says the local state goes with it.
             self.vault.revoke_local()
             raise
         except HttpError as exc:
@@ -415,8 +386,6 @@ class SyncClient(object):
                 raise self._auth_failure("/auth/refresh",
                                          {"request_id": exc.request_id,
                                           "code": exc.code}) from None
-            # 429 / 5xx are transient: keep the credentials and let the caller
-            # decide (the outbox retries them).
             raise
         access = payload.get("access_token")
         rotated = payload.get("refresh_token")
@@ -464,24 +433,54 @@ class SyncClient(object):
             self.vault.clear_user()
 
     def enroll(self):
-        """``POST /sync-devices/enroll`` with the live user access token.
+        """Enrol this machine for the logged-in user.
 
-        Persists ``sync_device_id`` in ``cloud_config.json`` and the device
-        refresh token in ``auth.dat``, both immediately (spec §5).
+        Server CRM v2 uses ``/sync-devices/self-enroll`` for both normal users
+        and administrators. A 404 means an older v1 host, so only then do we
+        fall back to the historical admin-only ``/sync-devices/enroll`` route.
+        Other failures are preserved exactly; in particular a 403 is never
+        converted into a legacy retry.
         """
-        payload = self._request("POST", "/sync-devices/enroll", auth=True,
-                                allow_refresh=False, user_auth=True, body={})
+        route = "/sync-devices/self-enroll"
+        try:
+            payload = self._request(
+                "POST", route, auth=True, allow_refresh=False,
+                user_auth=True, body={})
+        except HttpError as exc:
+            if exc.status != 404:
+                raise
+            route = "/sync-devices/enroll"
+            payload = self._request(
+                "POST", route, auth=True, allow_refresh=False,
+                user_auth=True, body={})
         device_id = payload.get("sync_device_id")
         refresh = payload.get("device_refresh_token")
         if not isinstance(device_id, str) or not device_id \
                 or not isinstance(refresh, str) or not refresh:
-            raise BadResponseError(route="/sync-devices/enroll", status=200)
+            raise BadResponseError(route=route, status=200)
         self.vault.save_device_refresh(refresh)
         self.config.sync_device_id = device_id
         self.config.save()
         if callable(self.on_auth_ok):
             self.on_auth_ok()
         return payload
+
+    def revoke_device(self, sync_device_id):
+        """Revoke one owned machine using the live user access token."""
+        if not isinstance(sync_device_id, str) or not sync_device_id:
+            raise BadResponseError(route="/sync-devices/revoke")
+        return self._request(
+            "POST", "/sync-devices/revoke", auth=True, allow_refresh=False,
+            user_auth=True, body={"sync_device_id": sync_device_id})
+
+    def revoke_all_devices(self, user_id=None):
+        """Revoke this user's machines, or an admin-selected user's machines."""
+        if user_id is not None and (not isinstance(user_id, str) or not user_id):
+            raise BadResponseError(route="/sync-devices/revoke-all")
+        body = {} if user_id is None else {"user_id": user_id}
+        return self._request(
+            "POST", "/sync-devices/revoke-all", auth=True,
+            allow_refresh=False, user_auth=True, body=body)
 
     # ------------------------------------------------------------------
     # Endpoints (spec §6)
@@ -492,23 +491,13 @@ class SyncClient(object):
                              allow_refresh=False)
 
     def bootstrap(self):
-        """``GET /sync/bootstrap`` — full snapshot + cursor + dataset epoch.
-
-        The returned cursor is persisted so the first incremental pull resumes
-        exactly where the snapshot ended (spec §6.2: snapshot and cursor come
-        from one transaction, so nothing committed between them is missed).
-        """
+        """``GET /sync/bootstrap`` — full snapshot + cursor + dataset epoch."""
         payload = self._request("GET", "/sync/bootstrap")
         self._remember_cursor(payload, "/sync/bootstrap")
         return payload
 
     def pull(self, cursor=None, limit=CHANGE_PAGE_LIMIT):
-        """``GET /sync/changes?cursor=&limit=`` — one page, never the whole log.
-
-        The cursor is **required state, not an optimisation**: filtering by
-        ``updated_at`` would drop rows on equal timestamps and clock skew
-        (spec §6.2), so only ``seq > cursor`` is ever used.
-        """
+        """``GET /sync/changes?cursor=&limit=`` — one page, never the whole log."""
         from urllib.parse import urlencode
         if cursor is None:
             cursor = self.config.cursor
@@ -524,13 +513,7 @@ class SyncClient(object):
 
     @staticmethod
     def _validate_page(payload, cursor, route):
-        """Refuse a page that would not move the cursor strictly forward.
-
-        Spec 6.2 filters on ``seq > cursor`` only: equal timestamps and clock
-        skew silently drop rows, and a page that went backwards would re-apply
-        them. Enforcing monotonic ``seq`` is also what keeps a parent row in
-        front of the child that references it.
-        """
+        """Refuse a page that would not move the cursor strictly forward."""
         if not isinstance(payload, dict) \
                 or not isinstance(payload.get("cursor"), int) \
                 or not isinstance(payload.get("has_more"), bool):
@@ -554,12 +537,7 @@ class SyncClient(object):
         return payload
 
     def pull_all(self, handler, *, limit=CHANGE_PAGE_LIMIT, max_pages=10000):
-        """Drain the change log, page by page, honouring ``has_more``.
-
-        ``handler(page)`` is called for every page; the cursor is persisted
-        **after** the handler returns, so a crash in the middle of a page
-        replays that page instead of skipping it. Returns the number of pages.
-        """
+        """Drain the change log, page by page, honouring ``has_more``."""
         if not callable(handler):
             raise BadResponseError(route="/sync/changes")
         cursor = self.config.cursor
@@ -571,9 +549,6 @@ class SyncClient(object):
                 try:
                     handler(page)
                 except UnresolvedReferenceError as exc:
-                    # Fail closed: the cursor is not advanced, so the next
-                    # start re-reads exactly this page, and the caller gets a
-                    # stable code instead of a mapping exception (section 11).
                     raise UnresolvedReferenceCloudError() from exc
             cursor = page["cursor"]
             self.config.set_cursor(cursor)
@@ -584,14 +559,11 @@ class SyncClient(object):
         return pages
 
     def import_document(self, body):
-        """``POST /bootstrap/import`` — the one-shot seed of spec §8.
+        """``POST /bootstrap/import`` — the one-shot admin seed of spec §8.
 
-        The device credential is the principal (the route requires a device
-        bearer) and the logged-in user's access token travels in
-        ``X-Acting-User``, because the host refuses an import without an
-        acting identity and enrolment/import are admin-only. That token is
-        RAM-only, so an absent or expired session raises here instead of
-        sending a request the host can only reject.
+        The device credential is the principal and the logged-in user's access
+        token travels in ``X-Acting-User``. The host refuses an import without
+        an acting admin identity.
         """
         return self._request("POST", "/bootstrap/import", body=body,
                              acting=True)
@@ -601,13 +573,7 @@ class SyncClient(object):
         return self._request("POST", "/admin/backup", body={}, acting=True)
 
     def push(self, operations):
-        """``POST /sync/mutations`` — batched push; conflicts come back as data.
-
-        Every operation must carry an ``operation_id``. When it does not, one
-        is minted **into the caller's dict**, so a retry of the same dict reuses
-        the id and the server replays its first result instead of applying the
-        change twice (spec §6.1).
-        """
+        """``POST /sync/mutations`` — batched push; conflicts come back as data."""
         if not isinstance(operations, (list, tuple)) or not operations:
             raise BadResponseError(route="/sync/mutations")
         prepared = []
@@ -626,8 +592,6 @@ class SyncClient(object):
                 raise BadResponseError(route="/sync/mutations")
             prepared.append(operation)
         prepared = push_order(prepared)
-        # No in-client retry here: spec §9 gives the backoff to the outbox,
-        # and re-sending a batch is the outbox's decision to make.
         payload = self._request("POST", "/sync/mutations",
                                 body={"operations": prepared})
         return self._parse_push(payload)
@@ -654,8 +618,6 @@ class SyncClient(object):
                                  item.get("server_record")))
         result = PushResult(applied, rows, cursor)
         if result.cursor >= self.config.cursor:
-            # The server's cursor only ever moves forward; adopting it here is
-            # what keeps a pull after a push from re-reading what we just wrote.
             self.config.set_cursor(result.cursor)
             self.config.save()
         return result
