@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/phase7-migration-reconciliation.yml'
       - 'lab/scripts/patch_phase7_migration_reconciliation.py'
+      - 'lab/scripts/patch_phase7_migration_reconciliation_v2.py'
 
 permissions:
   contents: read
@@ -45,6 +46,6 @@ jobs:
           echo "IRICA_MARIADB=$(command -v mariadb)" >> "$GITHUB_ENV"
           echo "IRICA_PHP=$(command -v php)" >> "$GITHUB_ENV"
       - name: Apply Phase 7 reconciliation test patch
-        run: python lab/scripts/patch_phase7_migration_reconciliation.py
+        run: python lab/scripts/patch_phase7_migration_reconciliation_v2.py
       - name: Verify reviewed migration reconciliation on real MariaDB
         run: python lab/scripts/run_panel_tests.py test_server_crm_v2_legacy_apply
