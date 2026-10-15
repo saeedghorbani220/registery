@@ -54,11 +54,13 @@ jobs:
           php -l host/src/LegacyVerify.php
           php -l host/src/LegacyApply.php
           php -l host/public/index.php
-      - name: Commit verified production and tests
+      - name: Commit and safely rebase verified production changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add host/migrations/004_legacy_import_verification.sql host/src/LegacyVerify.php host/src/LegacyApply.php host/public/index.php lab/tests/test_server_crm_v2_legacy_apply.py
           git diff --cached --check
           git commit -m "feat(migration): add transactional reconciliation report"
+          git fetch origin feat/server-crm-v2-work
+          git rebase origin/feat/server-crm-v2-work
           git push origin HEAD:feat/server-crm-v2-work
