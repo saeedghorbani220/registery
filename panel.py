@@ -2079,7 +2079,7 @@ def _cloud_dirty_set(outbox):
     return dirty
 
 
-def _cloud_enqueue_mutation(entity, legacy_id, record=None, kind="upsert"):
+def _cloud_enqueue_mutation(entity, legacy_id, record=None, kind="upsert", transport=None):
     """Enqueue a local CRM mutation into the cloud outbox (spec §9).
 
     Never raises: offline or unconfigured states leave local operations untouched.
@@ -2132,6 +2132,8 @@ def _cloud_enqueue_mutation(entity, legacy_id, record=None, kind="upsert"):
             "base_version": base_ver,
             "record": wire_record,
         }
+        if transport:
+            op["transport"] = str(transport)
         outbox.enqueue(op)
         cloud_worker_kick()
     except Exception:
@@ -12841,7 +12843,10 @@ class Handler(BaseHTTPRequestHandler):
                     if txs:
                         seq = len(txs) - 1
                         tx_rec = {**txs[-1], "seq": seq, "customer_id": record.get("id")}
-                        _cloud_enqueue_mutation("customer_transactions", f"{record.get('id')}/{seq}", tx_rec)
+                        _cloud_enqueue_mutation(
+                            "customer_transactions",
+                            f"{record.get('id')}/{seq}", tx_rec,
+                            transport="finance_append")
                 elif action == "void_tx" and isinstance(record, dict):
                     txs = record.get("transactions", [])
                     if 0 <= tx_index < len(txs):
