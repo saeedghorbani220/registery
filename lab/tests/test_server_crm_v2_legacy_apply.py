@@ -30,7 +30,8 @@ class LegacyApplyStaticTests(unittest.TestCase):
 
     def test_apply_locks_authority_and_financial_customer(self):
         self.assertIn("tenant_state WHERE tenant_id=? FOR UPDATE", self.source)
-        self.assertIn("customers WHERE id=? AND tenant_id=? AND deleted_at IS NULL FOR UPDATE", self.source)
+        self.assertIn("SELECT id,legacy_id FROM customers", self.source)
+        self.assertIn("WHERE id=? AND tenant_id=? AND deleted_at IS NULL FOR UPDATE", self.source)
         self.assertIn("MAX(seq)", self.source)
         self.assertIn("Ids::transactionLegacyId", self.source)
         self.assertIn("Ids::uuid5", self.source)
@@ -232,6 +233,31 @@ class LegacyApplyMariaDbTests(unittest.TestCase):
         values = self._sql("SELECT full_name,address,notes,row_version FROM customers WHERE id='%s';" % customer).strip().split("\t")
         self.assertEqual(values, ["Online Name", "Old address", "legacy-note", "2"])
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM customer_transactions WHERE customer_id='%s';" % customer), "1")
+
+    def test_rejected_parent_blocks_child_reference_fallback(self):
+        now = "2026-10-15 17:20:00"
+        customer = str(uuid.uuid4())
+        self._sql(
+            "INSERT INTO customers (id,tenant_id,legacy_id,row_version,created_at,updated_at,full_name,address,mobile,telegram_id,instagram_id,notes) "
+            "VALUES ('%s','%s','cust0001',1,'%s','%s','Online Name','Server address','09120000001','','','');" %
+            (customer, self.tenant, now, now)
+        )
+        staged = self._analyze(self.store())
+        parent = next(r for r in staged["records"] if r["entity"] == "customers")
+        self.assertEqual(parent["action"], "conflict")
+        job = staged["job"]["id"]
+
+        code, decision = self._call("decide", job, parent["id"], "reject")
+        self.assertEqual(code, 0, decision)
+        self.assertEqual(decision["result"]["job"]["status"], "ready")
+
+        code, failed = self._call("apply", job)
+        self.assertNotEqual(code, 0)
+        self.assertEqual((failed["status"], failed["code"]), (409, "VERSION_CONFLICT"))
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM customers;"), "1")
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM customer_transactions;"), "0")
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM change_log;"), "0")
+        self.assertEqual(self.scalar("SELECT status FROM legacy_import_jobs WHERE id='%s';" % job), "ready")
 
     def test_late_validation_failure_rolls_back_earlier_business_writes(self):
         store = self.store()

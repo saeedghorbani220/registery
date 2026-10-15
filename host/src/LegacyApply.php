@@ -352,6 +352,14 @@ final class LegacyApply
                     $sourceKey = (string) $row['source_key'];
 
                     if ($resolution === 'reject') {
+                        // An explicit parent rejection is stronger than a
+                        // missing mapping. Record a blocked sentinel so a child
+                        // cannot fall through to an unrelated live row that
+                        // happens to reuse the same legacy id.
+                        if ($entity !== 'customer_transactions'
+                            && $entity !== 'settings') {
+                            $sourceMap[$this->mapKey($entity, $sourceKey)] = '';
+                        }
                         $counts['rejected']++;
                         continue;
                     }
@@ -722,8 +730,9 @@ final class LegacyApply
                                       array $sourceMap): ?string
     {
         $key = $this->mapKey($entity, $sourceId);
-        if (isset($sourceMap[$key])) {
-            return $sourceMap[$key];
+        if (array_key_exists($key, $sourceMap)) {
+            $mapped = $sourceMap[$key];
+            return is_string($mapped) && Ids::isUuid($mapped) ? $mapped : null;
         }
         $table = Schema::tableForEntity($entity);
         if ($table === null) {
