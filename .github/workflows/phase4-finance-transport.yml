@@ -1,0 +1,89 @@
+name: phase4-finance-transport
+
+on:
+  push:
+    branches:
+      - 'feat/server-crm-v2-work'
+    paths:
+      - '.github/workflows/phase4-finance-transport.yml'
+      - 'lab/scripts/patch_phase4_finance_transport.py'
+
+permissions:
+  contents: write
+
+jobs:
+  windows-client:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/server-crm-v2-work
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --disable-pip-version-check requests
+      - run: python lab/scripts/patch_phase4_finance_transport.py
+      - name: Verify client transport and authority
+        run: >-
+          python lab/scripts/run_panel_tests.py
+          test_cloud_transport
+          test_server_crm_v2_authority
+
+  linux-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: irica_ci_root
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      IRICA_DB_ROOT_PASSWORD: irica_ci_root
+      IRICA_DB_HOST: 127.0.0.1
+      IRICA_DB_PORT: '3307'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/server-crm-v2-work
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install host test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mariadb-client php-cli php-mysql
+          echo "IRICA_MARIADB=$(command -v mariadb)" >> "$GITHUB_ENV"
+          echo "IRICA_PHP=$(command -v php)" >> "$GITHUB_ENV"
+      - run: python lab/scripts/patch_phase4_finance_transport.py
+      - name: Verify finance service and PHP syntax
+        run: >-
+          python lab/scripts/run_panel_tests.py
+          test_server_crm_v2_finance
+      - name: Lint patched front controller
+        run: php -l host/public/index.php
+
+  commit:
+    needs: [windows-client, linux-host]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/server-crm-v2-work
+          fetch-depth: 0
+      - run: python lab/scripts/patch_phase4_finance_transport.py
+      - name: Commit verified changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add cloud_sync/client.py host/public/index.php lab/tests/test_cloud_transport.py lab/tests/test_server_crm_v2_finance.py
+          git diff --cached --check
+          git commit -m "feat(finance): route ledger appends through server authority"
+          git push origin HEAD:feat/server-crm-v2-work
