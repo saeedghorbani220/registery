@@ -35,30 +35,30 @@ def main() -> None:
 
     # A cached config is desirable for normal requests, but an emergency-style
     # migration kill switch must notice on-disk disablement immediately even in
-    # a long-lived PHP-FPM worker. Invalid/missing fresh values fail closed.
+    # a long-lived PHP-FPM worker. Reading source text avoids require/opcache;
+    # only an exact literal true/false is accepted and every other shape fails
+    # closed to the caller's default.
     anchor = '''    public static function path(): string\n    {\n'''
     method = r'''    /**
-     * Read one boolean directly from the active config file without using the
-     * process cache. Security kill switches use this so disabling them takes
-     * effect on the very next request in long-lived PHP-FPM workers.
+     * Read one literal boolean directly from the active config source without
+     * executing the file or consulting the process cache. Security kill
+     * switches use this so edits take effect on the very next request even
+     * when PHP OPcache is configured not to revalidate scripts.
      */
     public static function freshBoolean(string $key, bool $default = false): bool
     {
         $file = self::$path !== '' ? self::$path : self::locate();
-        if (!is_file($file)) {
+        $source = @file_get_contents($file);
+        if (!is_string($source) || $source === '') {
             return $default;
         }
-        try {
-            $raw = require $file;
-        } catch (\Throwable $error) {
-            unset($error);
+        $quoted = preg_quote($key, '/');
+        $pattern = '/[\'\"]' . $quoted . '[\'\"]\s*=>\s*(true|false)\b/i';
+        $matched = preg_match($pattern, $source, $match);
+        if ($matched !== 1 || !isset($match[1])) {
             return $default;
         }
-        if (!is_array($raw) || !array_key_exists($key, $raw)
-            || !is_bool($raw[$key])) {
-            return $default;
-        }
-        return $raw[$key];
+        return strtolower((string) $match[1]) === 'true';
     }
 
 '''
