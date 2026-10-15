@@ -52,6 +52,9 @@ jobs:
           --health-retries=20
     env:
       IRICA_DB_ROOT_PASSWORD: irica_ci_root
+      IRICA_DB_API_PASSWORD: irica_ci_api
+      IRICA_DB_HOST: 127.0.0.1
+      IRICA_DB_PORT: '3307'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -63,8 +66,9 @@ jobs:
           sudo apt-get install -y mariadb-client php-cli php-mysql php-mbstring php-curl
           echo "IRICA_PHP=$(command -v php)" >> "$GITHUB_ENV"
           echo "IRICA_MARIADB=$(command -v mariadb)" >> "$GITHUB_ENV"
-      - name: Run host schema and API tests
+      - name: Run host schema, v2 migration and API tests
         run: >-
           python lab/scripts/run_panel_tests.py
           test_host_schema
+          test_server_crm_v2_schema
           test_host_api
