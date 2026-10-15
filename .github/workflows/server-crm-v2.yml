@@ -81,6 +81,8 @@ jobs:
           test_server_crm_v2_finance_transport
           test_server_crm_v2_legacy_import
           test_server_crm_v2_legacy_apply
-      - name: Lint host PHP entry points
+          test_server_crm_v2_legacy_page
+      - name: Lint host PHP and migration page JavaScript
         run: |
           find host -type f -name '*.php' -print0 | xargs -0 -n1 php -l
+          node --check host/public/legacy-import.js
