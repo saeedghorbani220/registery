@@ -19,6 +19,161 @@ require_once __DIR__ . '/../src/Schema.php';
 require_once __DIR__ . '/../src/Config.php';
 require_once __DIR__ . '/../src/Database.php';
 
+
+/**
+ * Build the exact SQL/gzip payload used by production backup delivery.
+ *
+ * Tables and triggers are discovered from the live database rather than from
+ * Schema::tables(): forward migrations add operational tables and triggers
+ * that are intentionally outside the synced-entity allowlist.
+ *
+ * @return array<string, mixed>
+ */
+function build_database_backup_dump(Database $db, string $dbName): array
+{
+    $pdo = $db->pdo();
+    $nowUtc = gmdate('Y-m-d H:i:s');
+    $dateSlug = gmdate('Ymd_His');
+
+    $tableStmt = $pdo->query(
+        "SELECT TABLE_NAME FROM information_schema.TABLES "
+        . "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE' "
+        . "ORDER BY TABLE_NAME"
+    );
+    $tables = $tableStmt->fetchAll(\PDO::FETCH_COLUMN);
+    if (!is_array($tables) || $tables === []) {
+        throw new \RuntimeException('No base tables are visible for database backup');
+    }
+
+    $sqlParts = [];
+    $sqlParts[] = "-- ============================================================";
+    $sqlParts[] = "-- IRICA Cloud CRM Database Backup";
+    $sqlParts[] = "-- Date (UTC): " . $nowUtc;
+    $sqlParts[] = "-- Database: " . $dbName;
+    $sqlParts[] = "-- ============================================================";
+    $sqlParts[] = "";
+    $sqlParts[] = "SET FOREIGN_KEY_CHECKS = 0;";
+    $sqlParts[] = "SET SQL_MODE = 'NO_AUTO_VALUE_ON_ZERO';";
+    $sqlParts[] = "SET NAMES utf8mb4;";
+    $sqlParts[] = "";
+
+    $totalRows = 0;
+    $dumpedTables = 0;
+    foreach ($tables as $table) {
+        if (!is_string($table) || preg_match('/^[A-Za-z0-9_]+$/D', $table) !== 1) {
+            throw new \RuntimeException('Unsafe database table identifier in backup');
+        }
+        $quotedTable = '`' . $table . '`';
+        $sqlParts[] = "-- ------------------------------------------------------------";
+        $sqlParts[] = "-- Table structure for `{$table}`";
+        $sqlParts[] = "-- ------------------------------------------------------------";
+        $sqlParts[] = "DROP TABLE IF EXISTS {$quotedTable};";
+
+        $createStmt = $pdo->query("SHOW CREATE TABLE {$quotedTable}");
+        $createRow = $createStmt->fetch(\PDO::FETCH_NUM);
+        if (!$createRow || !isset($createRow[1]) || !is_string($createRow[1])) {
+            throw new \RuntimeException('Unable to read a table definition for backup');
+        }
+        $sqlParts[] = $createRow[1] . ";";
+        $sqlParts[] = "";
+
+        $dataStmt = $pdo->query("SELECT * FROM {$quotedTable}");
+        $rows = $dataStmt->fetchAll(\PDO::FETCH_ASSOC);
+        $rowCount = count($rows);
+        $totalRows += $rowCount;
+        $dumpedTables++;
+        if ($rowCount === 0) {
+            continue;
+        }
+        $sqlParts[] = "-- Data for table `{$table}` ({$rowCount} rows)";
+        $cols = array_keys($rows[0]);
+        foreach ($cols as $col) {
+            if (!is_string($col) || preg_match('/^[A-Za-z0-9_]+$/D', $col) !== 1) {
+                throw new \RuntimeException('Unsafe database column identifier in backup');
+            }
+        }
+        $colsList = implode(', ', array_map(
+            static fn (string $col): string => '`' . $col . '`', $cols
+        ));
+        foreach (array_chunk($rows, 100) as $chunk) {
+            $valSets = [];
+            foreach ($chunk as $row) {
+                $escapedVals = [];
+                foreach ($cols as $col) {
+                    $val = $row[$col];
+                    if ($val === null) {
+                        $escapedVals[] = 'NULL';
+                    } elseif (is_int($val) || is_float($val)) {
+                        $escapedVals[] = (string) $val;
+                    } else {
+                        $escapedVals[] = $pdo->quote((string) $val);
+                    }
+                }
+                $valSets[] = '(' . implode(', ', $escapedVals) . ')';
+            }
+            $sqlParts[] = "INSERT INTO {$quotedTable} ({$colsList}) VALUES\n  "
+                . implode(",\n  ", $valSets) . ";";
+        }
+        $sqlParts[] = "";
+    }
+
+    $triggerStmt = $pdo->query(
+        "SELECT TRIGGER_NAME, EVENT_MANIPULATION, EVENT_OBJECT_TABLE, "
+        . "ACTION_TIMING, ACTION_STATEMENT FROM information_schema.TRIGGERS "
+        . "WHERE TRIGGER_SCHEMA = DATABASE() ORDER BY TRIGGER_NAME"
+    );
+    $triggers = $triggerStmt->fetchAll(\PDO::FETCH_ASSOC);
+    $dumpedTriggers = 0;
+    if ($triggers !== []) {
+        $sqlParts[] = "-- ------------------------------------------------------------";
+        $sqlParts[] = "-- Triggers";
+        $sqlParts[] = "-- ------------------------------------------------------------";
+        $sqlParts[] = 'DELIMITER $$';
+        foreach ($triggers as $trigger) {
+            $name = $trigger['TRIGGER_NAME'] ?? null;
+            $event = strtoupper((string) ($trigger['EVENT_MANIPULATION'] ?? ''));
+            $table = $trigger['EVENT_OBJECT_TABLE'] ?? null;
+            $timing = strtoupper((string) ($trigger['ACTION_TIMING'] ?? ''));
+            $statement = $trigger['ACTION_STATEMENT'] ?? null;
+            if (!is_string($name) || !is_string($table)
+                || preg_match('/^[A-Za-z0-9_]+$/D', $name) !== 1
+                || preg_match('/^[A-Za-z0-9_]+$/D', $table) !== 1
+                || !in_array($event, ['INSERT', 'UPDATE', 'DELETE'], true)
+                || !in_array($timing, ['BEFORE', 'AFTER'], true)
+                || !is_string($statement) || trim($statement) === ''
+                || str_contains($statement, '$$')) {
+                throw new \RuntimeException('Unsafe trigger definition in backup');
+            }
+            $sqlParts[] = "DROP TRIGGER IF EXISTS `{$name}`$$";
+            $sqlParts[] = "CREATE TRIGGER `{$name}` {$timing} {$event} "
+                . "ON `{$table}` FOR EACH ROW {$statement}$$";
+            $dumpedTriggers++;
+        }
+        $sqlParts[] = 'DELIMITER ;';
+        $sqlParts[] = "";
+    }
+
+    $sqlParts[] = "SET FOREIGN_KEY_CHECKS = 1;";
+    $sqlParts[] = "-- Backup completed successfully at " . gmdate('Y-m-d H:i:s') . " UTC.";
+    $fullSql = implode("\n", $sqlParts);
+    $gzippedSql = gzencode($fullSql, 9);
+    if ($gzippedSql === false) {
+        throw new \RuntimeException('Failed to gzip database dump');
+    }
+    return [
+        'sql' => $fullSql,
+        'gzipped_sql' => $gzippedSql,
+        'timestamp' => $nowUtc,
+        'date_slug' => $dateSlug,
+        'tables_dumped' => $dumpedTables,
+        'triggers_dumped' => $dumpedTriggers,
+        'total_rows' => $totalRows,
+        'uncompressed_bytes' => strlen($fullSql),
+        'compressed_bytes' => strlen($gzippedSql),
+        'sha256' => hash('sha256', $gzippedSql),
+    ];
+}
+
 /**
  * Perform full MySQL database dump and deliver via Telegram.
  *
@@ -43,102 +198,27 @@ function run_database_backup(?Database $db = null, ?array $config = null, array 
         $db = Database::fromConfig($dbConfig);
     }
 
-    $pdo = $db->pdo();
-    $nowUtc = gmdate('Y-m-d H:i:s');
-    $dateSlug = gmdate('Ymd_His');
     $dbName = $config['db']['dbname'] ?? 'irica_cloud';
-
-    // -----------------------------------------------------------------------
-    // 1. Generate full SQL dump via PDO
-    // -----------------------------------------------------------------------
-    $tables = Schema::tables();
-    $sqlParts = [];
-    $sqlParts[] = "-- ============================================================";
-    $sqlParts[] = "-- IRICA Cloud CRM Database Backup";
-    $sqlParts[] = "-- Date (UTC): " . $nowUtc;
-    $sqlParts[] = "-- Database: " . $dbName;
-    $sqlParts[] = "-- ============================================================";
-    $sqlParts[] = "";
-    $sqlParts[] = "SET FOREIGN_KEY_CHECKS = 0;";
-    $sqlParts[] = "SET SQL_MODE = 'NO_AUTO_VALUE_ON_ZERO';";
-    $sqlParts[] = "SET NAMES utf8mb4;";
-    $sqlParts[] = "";
-
-    $totalRows = 0;
-    $dumpedTables = 0;
-
-    foreach ($tables as $table) {
-        try {
-            // Check if table exists in DB
-            $check = $pdo->prepare("SHOW TABLES LIKE ?");
-            $check->execute([$table]);
-            if (!$check->fetch()) {
-                continue;
-            }
-
-            $sqlParts[] = "-- ------------------------------------------------------------";
-            $sqlParts[] = "-- Table structure for `{$table}`";
-            $sqlParts[] = "-- ------------------------------------------------------------";
-            $sqlParts[] = "DROP TABLE IF EXISTS `{$table}`;";
-
-            $createStmt = $pdo->query("SHOW CREATE TABLE `{$table}`");
-            $createRow = $createStmt->fetch(\PDO::FETCH_NUM);
-            if ($createRow && isset($createRow[1])) {
-                $sqlParts[] = $createRow[1] . ";";
-            }
-            $sqlParts[] = "";
-
-            // Dump rows
-            $dataStmt = $pdo->query("SELECT * FROM `{$table}`");
-            $rows = $dataStmt->fetchAll(\PDO::FETCH_ASSOC);
-            $rowCount = count($rows);
-            $totalRows += $rowCount;
-            $dumpedTables++;
-
-            if ($rowCount > 0) {
-                $sqlParts[] = "-- Data for table `{$table}` ({$rowCount} rows)";
-                $cols = array_keys($rows[0]);
-                $quotedCols = array_map(fn($c) => "`{$c}`", $cols);
-                $colsList = implode(', ', $quotedCols);
-
-                // Chunk inserts in batches of 100 for safety and speed
-                $chunks = array_chunk($rows, 100);
-                foreach ($chunks as $chunk) {
-                    $valSets = [];
-                    foreach ($chunk as $row) {
-                        $escapedVals = [];
-                        foreach ($cols as $col) {
-                            $val = $row[$col];
-                            if ($val === null) {
-                                $escapedVals[] = "NULL";
-                            } elseif (is_int($val) || is_float($val)) {
-                                $escapedVals[] = (string) $val;
-                            } else {
-                                $escapedVals[] = $pdo->quote((string) $val);
-                            }
-                        }
-                        $valSets[] = "(" . implode(', ', $escapedVals) . ")";
-                    }
-                    $sqlParts[] = "INSERT INTO `{$table}` ({$colsList}) VALUES\n  " . implode(",\n  ", $valSets) . ";";
-                }
-                $sqlParts[] = "";
-            }
-        } catch (\Throwable $e) {
-            $sqlParts[] = "-- [WARNING] Failed to dump table `{$table}`: " . $e->getMessage();
-        }
+    $dumpDb = $db;
+    $migrationConfig = $config['db_migrate'] ?? null;
+    if (is_array($migrationConfig) && !empty($migrationConfig['user'])
+        && !empty($migrationConfig['password'])) {
+        // The normal app account is deliberately DML-only. Trigger metadata
+        // may require migration-level metadata privileges, so use the existing
+        // privileged connection for the controlled read-only dump when present.
+        $dumpDb = Database::fromConfig($migrationConfig);
     }
-
-    $sqlParts[] = "SET FOREIGN_KEY_CHECKS = 1;";
-    $sqlParts[] = "-- Backup completed successfully at " . gmdate('Y-m-d H:i:s') . " UTC.";
-
-    $fullSql = implode("\n", $sqlParts);
-    $uncompressedBytes = strlen($fullSql);
-    $gzippedSql = gzencode($fullSql, 9);
-    if ($gzippedSql === false) {
-        throw new \RuntimeException('Failed to gzip database dump');
-    }
-    $compressedBytes = strlen($gzippedSql);
-    $sha256 = hash('sha256', $gzippedSql);
+    $dump = build_database_backup_dump($dumpDb, (string) $dbName);
+    $pdo = $db->pdo();
+    $nowUtc = (string) $dump['timestamp'];
+    $dateSlug = (string) $dump['date_slug'];
+    $totalRows = (int) $dump['total_rows'];
+    $dumpedTables = (int) $dump['tables_dumped'];
+    $dumpedTriggers = (int) $dump['triggers_dumped'];
+    $uncompressedBytes = (int) $dump['uncompressed_bytes'];
+    $gzippedSql = (string) $dump['gzipped_sql'];
+    $compressedBytes = (int) $dump['compressed_bytes'];
+    $sha256 = (string) $dump['sha256'];
 
     // Save temporary file
     $tmpDir = $hostRoot . '/var/tmp';
@@ -254,6 +334,7 @@ function run_database_backup(?Database $db = null, ?array $config = null, array 
         'timestamp' => $nowUtc,
         'database' => $dbName,
         'tables_dumped' => $dumpedTables,
+        'triggers_dumped' => $dumpedTriggers,
         'total_rows' => $totalRows,
         'uncompressed_bytes' => $uncompressedBytes,
         'compressed_bytes' => $compressedBytes,
