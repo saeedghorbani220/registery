@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/phase6-cloud-device-ux.yml'
       - 'lab/scripts/patch_phase6_cloud_device_ux_v2.py'
+      - 'lab/scripts/fix_phase6_v2_counts.py'
 
 permissions:
   contents: write
@@ -26,7 +27,9 @@ jobs:
       - name: Install lightweight test dependencies
         run: python -m pip install --disable-pip-version-check requests
       - name: Apply Phase 6 device UX patch
-        run: python lab/scripts/patch_phase6_cloud_device_ux_v2.py
+        run: |
+          python lab/scripts/fix_phase6_v2_counts.py
+          python lab/scripts/patch_phase6_cloud_device_ux_v2.py
       - name: Verify cloud UI and device client behavior
         run: >-
           python lab/scripts/run_panel_tests.py
