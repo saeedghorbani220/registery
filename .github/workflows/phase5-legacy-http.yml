@@ -63,7 +63,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add host/config/config.example.php host/public/index.php lab/tests/test_host_api.py
+          git add host/config/config.example.php host/src/Config.php host/public/index.php lab/tests/test_host_api.py
           git diff --cached --check
           git commit -m "feat(migration): expose guarded legacy migration API"
           git push origin HEAD:feat/server-crm-v2-work
