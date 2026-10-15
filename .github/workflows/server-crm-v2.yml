@@ -3,6 +3,7 @@ name: server-crm-v2
 on:
   push:
     branches:
+      - main
       - 'feat/server-crm-v2-work'
   pull_request:
     branches:
