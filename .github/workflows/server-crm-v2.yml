@@ -1,0 +1,70 @@
+name: server-crm-v2
+
+on:
+  push:
+    branches:
+      - 'feat/server-crm-v2-work'
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  cloud-client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install lightweight test dependencies
+        run: python -m pip install --disable-pip-version-check requests
+      - name: Run cloud client and contract tests
+        run: >-
+          python lab/scripts/run_panel_tests.py
+          test_cloud_state
+          test_cloud_mapper
+          test_cloud_transport
+          test_cloud_apply
+          test_cloud_import
+          test_cloud_ui
+          test_cloud_conflicts
+          test_cloud_integration
+          test_cloud_online_mode_and_backup
+
+  host-api:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: irica_ci_root
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      IRICA_DB_ROOT_PASSWORD: irica_ci_root
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install MariaDB client and PHP extensions
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mariadb-client php-cli php-mysql php-mbstring php-curl
+          echo "IRICA_PHP=$(command -v php)" >> "$GITHUB_ENV"
+          echo "IRICA_MARIADB=$(command -v mariadb)" >> "$GITHUB_ENV"
+      - name: Run host schema and API tests
+        run: >-
+          python lab/scripts/run_panel_tests.py
+          test_host_schema
+          test_host_api
