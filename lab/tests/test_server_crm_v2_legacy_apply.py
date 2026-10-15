@@ -15,6 +15,7 @@ MIGRATION_FILES = (
     "001_initial.sql",
     "002_server_crm_v2_foundation.sql",
     "003_server_crm_v2_device_auth.sql",
+    "004_legacy_import_verification.sql",
 )
 
 
@@ -109,22 +110,22 @@ class LegacyApplyMariaDbTests(unittest.TestCase):
 
     @classmethod
     def _write_script(cls):
-        required = ("Schema", "Database", "Http", "Ids", "Log", "Tokens", "Roles", "RateLimit", "Auth", "Sync", "LegacyImport", "LegacyApply")
+        required = ("Schema", "Database", "Http", "Ids", "Log", "Tokens", "Roles", "RateLimit", "Auth", "Sync", "LegacyImport", "LegacyVerify", "LegacyApply")
         lines = ["<?php", "declare(strict_types=1);"]
         for name in required:
             lines.append("require_once %s;" % json.dumps(os.path.join(HOST, "src", name + ".php").replace("\\", "/")))
         lines.extend([
             "$db=Database::fromConfig(['host'=>getenv('IRICA_DB_HOST'),'port'=>(int)getenv('IRICA_DB_PORT'),'dbname'=>getenv('IRICA_LEGACY_DB'),'user'=>'root','password'=>getenv('IRICA_DB_ROOT_PASSWORD')]);",
             "$log=new Log(null); $sync=new Sync($db,$log,[]);",
-            "$import=new LegacyImport($db,$sync,$log,['limits'=>['max_import_body_bytes'=>16777216]]); $apply=new LegacyApply($db,$sync,$log,[]);",
+            "$import=new LegacyImport($db,$sync,$log,['limits'=>['max_import_body_bytes'=>16777216]]); $verify=new LegacyVerify($db,$log,[]); $apply=new LegacyApply($db,$sync,$log,[]);",
             "$tenant=getenv('IRICA_LEGACY_TENANT'); $user=getenv('IRICA_LEGACY_USER'); $p=new Principal(Tokens::KIND_USER,$user,$tenant,Roles::ADMIN,$user,'',Ids::v4(),1);",
-            "$action=$argv[1]; try { if($action==='analyze'){$body=['source_text'=>file_get_contents($argv[2]),'filename'=>basename($argv[2]),'source_version'=>'1.13.1'];$r=$import->analyze($p,$body,Ids::v4(),'127.0.0.1');} elseif($action==='apply'){$r=$apply->apply($p,$argv[2],Ids::v4(),'127.0.0.1');} elseif($action==='decide'){$body=['job_id'=>$argv[2],'record_id'=>$argv[3],'resolution'=>$argv[4]];if(isset($argv[5])&&$argv[5]!==''){$body['target_id']=$argv[5];}$r=$apply->decide($p,$body,Ids::v4(),'127.0.0.1');} elseif($action==='review'){$r=$apply->review($p,$argv[2]);} else {throw new RuntimeException('bad action');} echo json_encode(['ok'=>true,'result'=>$r],JSON_UNESCAPED_UNICODE); } catch(ApiException $e){echo json_encode(['ok'=>false,'status'=>$e->status,'code'=>$e->errorCode]);exit(2);} catch(Throwable $e){echo json_encode(['ok'=>false,'status'=>500,'code'=>'SERVER_ERROR']);exit(3);}",
+            "$action=$argv[1]; try { if($action==='analyze'){$body=['source_text'=>file_get_contents($argv[2]),'filename'=>basename($argv[2]),'source_version'=>'1.13.1'];$r=$import->analyze($p,$body,Ids::v4(),'127.0.0.1');} elseif($action==='apply'){$r=$apply->apply($p,$argv[2],Ids::v4(),'127.0.0.1');} elseif($action==='verify'){$r=$verify->report($p,$argv[2]);} elseif($action==='decide'){$body=['job_id'=>$argv[2],'record_id'=>$argv[3],'resolution'=>$argv[4]];if(isset($argv[5])&&$argv[5]!==''){$body['target_id']=$argv[5];}$r=$apply->decide($p,$body,Ids::v4(),'127.0.0.1');} elseif($action==='review'){$r=$apply->review($p,$argv[2]);} else {throw new RuntimeException('bad action');} echo json_encode(['ok'=>true,'result'=>$r],JSON_UNESCAPED_UNICODE); } catch(ApiException $e){echo json_encode(['ok'=>false,'status'=>$e->status,'code'=>$e->errorCode]);exit(2);} catch(Throwable $e){echo json_encode(['ok'=>false,'status'=>500,'code'=>'SERVER_ERROR']);exit(3);}",
         ])
         with open(cls.script, "w", encoding="utf-8") as handle:
             handle.write("\n".join(lines) + "\n")
 
     def setUp(self):
-        self._sql("DELETE FROM legacy_import_decisions; DELETE FROM legacy_import_records; DELETE FROM legacy_import_jobs; DELETE FROM audit_events WHERE action LIKE 'legacy_import.%';")
+        self._sql("DELETE FROM legacy_import_verifications; DELETE FROM legacy_import_decisions; DELETE FROM legacy_import_records; DELETE FROM legacy_import_jobs; DELETE FROM audit_events WHERE action LIKE 'legacy_import.%';")
         self._sql("DELETE FROM change_log; DELETE FROM customer_transactions; DELETE FROM crm_devices; DELETE FROM owners; DELETE FROM identities; DELETE FROM settings; DELETE FROM periods; DELETE FROM customers;")
         self._sql("UPDATE tenant_state SET dataset_epoch=1,bootstrap_status='done',source_installation_id='%s',last_import_id=NULL,last_import_hash=NULL;" % self.dataset_source)
 
@@ -375,6 +376,17 @@ class LegacyApplyMariaDbTests(unittest.TestCase):
         self.assertEqual(self.scalar("SELECT seq FROM customer_transactions WHERE id='%s';" % expected_tx), "0")
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM change_log WHERE operation_id='%s';" % job), "2")
         self.assertEqual(self.scalar("SELECT status FROM legacy_import_jobs WHERE id='%s';" % job), "applied")
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM legacy_import_verifications WHERE job_id='%s';" % job), "1")
+        code, verified = self._call("verify", job)
+        self.assertEqual(code, 0, verified)
+        report = verified["result"]
+        self.assertTrue(report["passed"], report)
+        self.assertEqual(report["counts"]["customers"], {"before": 0, "created": 1, "after": 1, "delta_matches": True})
+        self.assertEqual(report["counts"]["customer_transactions"], {"before": 0, "created": 1, "after": 1, "delta_matches": True})
+        self.assertEqual(report["financial"]["created_gross_amount"], 1200)
+        self.assertEqual(report["financial"]["gross_delta"], 1200)
+        self.assertTrue(report["financial"]["gross_delta_matches"])
+        self.assertEqual(report["row_checks"]["mismatched"], 0)
 
         code, replay = self._call("apply", job)
         self.assertEqual(code, 0, replay)
@@ -382,6 +394,21 @@ class LegacyApplyMariaDbTests(unittest.TestCase):
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM customers;"), "1")
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM customer_transactions;"), "1")
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM change_log;"), "2")
+
+    def test_verification_detects_live_financial_tampering_without_exposing_pii(self):
+        staged = self._analyze(self.store())
+        job = staged["job"]["id"]
+        code, applied = self._call("apply", job)
+        self.assertEqual(code, 0, applied)
+        self._sql("UPDATE customer_transactions SET amount=999 WHERE tenant_id='%s';" % self.tenant)
+        code, verified = self._call("verify", job)
+        self.assertEqual(code, 0, verified)
+        report = verified["result"]
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["issues"].get("TRANSACTION_AMOUNT_MISMATCH:customer_transactions"), 1)
+        serialized = json.dumps(report, ensure_ascii=False)
+        for pii in ("Legacy Customer", "09120000001", "Old address", "receipt"):
+            self.assertNotIn(pii, serialized)
 
     def test_existing_customer_mapping_allocates_next_server_ledger_sequence(self):
         now = "2026-10-15 17:20:00"

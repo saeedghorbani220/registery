@@ -318,6 +318,7 @@ final class LegacyApply
                 . 'WHERE id=? AND tenant_id=?',
                 ['applying', gmdate('Y-m-d H:i:s'), $jobId, $user->tenantId]
             );
+            $verificationBefore = LegacyVerify::captureSnapshot($tx, $user->tenantId);
 
             $staged = $tx->query(
                 'SELECT r.*,d.resolution,d.target_id AS decision_target_id '
@@ -459,6 +460,11 @@ final class LegacyApply
                 }
             }
 
+            $verificationAfter = LegacyVerify::captureSnapshot($tx, $user->tenantId);
+            LegacyVerify::storeSnapshots(
+                $tx, $user->tenantId, $jobId,
+                $verificationBefore, $verificationAfter, $now
+            );
             $cursor = $tx->queryValue(
                 'SELECT MAX(seq) FROM change_log WHERE tenant_id=?',
                 [$user->tenantId]

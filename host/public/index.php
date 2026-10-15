@@ -33,7 +33,7 @@ define('HOST_ROOT', dirname(__DIR__));
 foreach ([
     'Schema', 'Database', 'Http', 'Ids', 'Config', 'Log', 'Tokens', 'Roles',
     'RateLimit', 'Auth', 'Devices', 'Sync', 'Import', 'Finance',
-    'LegacyImport', 'LegacyApply',
+    'LegacyImport', 'LegacyVerify', 'LegacyApply',
 ] as $classFile) {
     require_once HOST_ROOT . '/src/' . $classFile . '.php';
 }
@@ -106,6 +106,7 @@ try {
         '/legacy-import/review' => ['GET'],
         '/legacy-import/decision' => ['POST'],
         '/legacy-import/apply' => ['POST'],
+        '/legacy-import/verify' => ['GET'],
         '/bootstrap/import' => ['POST'],
         '/admin/backup' => ['POST'],
     ];
@@ -132,6 +133,7 @@ try {
     $import = new Import($db, $sync, $log, $config);
     $finance = new Finance($db, $log, $config);
     $legacyImport = new LegacyImport($db, $sync, $log, $config);
+    $legacyVerify = new LegacyVerify($db, $log, $config);
     $legacyApply = new LegacyApply($db, $sync, $log, $config);
     $ip = $request->remoteAddr;
 
@@ -362,6 +364,16 @@ try {
             $payload = $legacyApply->apply(
                 $user, $jobId, $requestId, $ip
             );
+            $statusCode = 200;
+            $errorCode = '';
+            Response::ok($payload);
+            break;
+
+        case '/legacy-import/verify':
+            $user = requireUser($auth, $request);
+            requireLegacyImportEnabled($config);
+            $jobId = stringQuery($request, 'job_id');
+            $payload = $legacyVerify->report($user, $jobId);
             $statusCode = 200;
             $errorCode = '';
             Response::ok($payload);
