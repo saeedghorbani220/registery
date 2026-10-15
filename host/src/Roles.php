@@ -10,7 +10,8 @@
  *   settings read                                 yes     yes
  *   settings write                                yes      no
  *   self-enrol a desktop device                    yes     yes
- *   manage other users/devices; run import         yes      no
+ *   admin enrol/manage other users/devices         yes      no
+ *   run import                                     yes      no
  *
  * There are exactly two roles and no row-owner concept for CRM business data.
  * Device ownership is different: a user may enrol a device for their own
@@ -48,13 +49,14 @@ final class Roles
         return $kind === 'upsert';
     }
 
-    /**
-     * Every authenticated CRM user may enrol the machine they are currently
-     * logging in from. The enrol endpoint binds ownership to that same user;
-     * this capability is deliberately not permission to manage another
-     * user's devices.
-     */
+    /** Historical/admin enrol endpoint: remains admin-only for compatibility. */
     public static function canEnroll(string $role): bool
+    {
+        return $role === self::ADMIN;
+    }
+
+    /** A logged-in CRM user may enrol the machine for their own account. */
+    public static function canSelfEnroll(string $role): bool
     {
         return self::isKnown($role);
     }
@@ -104,11 +106,29 @@ final class Roles
     }
 
     /** @throws ApiException */
+    public static function requireSelfEnroll(string $role): void
+    {
+        if (!self::canSelfEnroll($role)) {
+            throw new ApiException(403, Codes::ROLE_FORBIDDEN,
+                'the acting role may not self-enrol a device');
+        }
+    }
+
+    /** @throws ApiException */
     public static function requireImport(string $role): void
     {
         if (!self::canImport($role)) {
             throw new ApiException(403, Codes::ROLE_FORBIDDEN,
                 'the acting role may not run an import');
+        }
+    }
+
+    /** @throws ApiException */
+    public static function requireAdmin(string $role): void
+    {
+        if ($role !== self::ADMIN) {
+            throw new ApiException(403, Codes::ROLE_FORBIDDEN,
+                'the acting role must be an administrator');
         }
     }
 }
