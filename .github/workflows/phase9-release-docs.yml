@@ -35,7 +35,7 @@ jobs:
           notes = (root / 'RELEASE_NOTES_v1.15.0.md').read_text(encoding='utf-8')
           install = (root / 'host' / 'INSTALL.md').read_text(encoding='utf-8')
           assert '## [1.15.0] - 2026-10-15' in changelog
-          assert 'Legacy Migration Center' in changelog
+          assert 'CRM Migration Center for v1.13.1 and older stores' in changelog
           assert 'fully restorable' in changelog
           assert 'v1.15.0' in notes
           assert 'Local CRM mode remains available' in notes
