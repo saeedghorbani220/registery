@@ -38,6 +38,7 @@ jobs:
           test_cloud_online_mode_and_backup
           test_server_crm_v2_client_devices
           test_server_crm_v2_authority
+          test_server_crm_v2_finance_outbox
 
   host-foundation:
     runs-on: ubuntu-latest
