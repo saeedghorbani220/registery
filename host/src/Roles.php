@@ -1,6 +1,6 @@
 <?php
 /**
- * Roles.php — the spec §7 authorization matrix, in one place.
+ * Roles.php — the server CRM authorization matrix, in one place.
  *
  *   capability                                   admin   user
  *   read all synced data                          yes     yes
@@ -9,12 +9,13 @@
  *   open/close periods, delete records            yes      no
  *   settings read                                 yes     yes
  *   settings write                                yes      no
- *   users, roles, devices; enrol; run import      yes      no
+ *   self-enrol a desktop device                    yes     yes
+ *   manage other users/devices; run import         yes      no
  *
- * There are exactly two roles (spec §7: "no other roles in v1") and no
- * row-owner concept. A capability that is not listed here is denied, so a
- * new entity or operation defaults to "both may do it" only through the
- * explicit allowlist below — never through a missing check.
+ * There are exactly two roles and no row-owner concept for CRM business data.
+ * Device ownership is different: a user may enrol a device for their own
+ * account, while management of somebody else's device remains an admin task.
+ * A capability that is not listed here is denied.
  */
 
 declare(strict_types=1);
@@ -31,7 +32,7 @@ final class Roles
      * May this role write `entity` with `kind`?
      *
      * Reads are not gated here: every authenticated principal may read the
-     * synced dataset (spec §7, first row of the matrix).
+     * synced dataset.
      */
     public static function canWrite(string $role, string $entity, string $kind): bool
     {
@@ -39,25 +40,26 @@ final class Roles
             return false;
         }
         if ($kind === 'delete') {
-            // "open/close periods, delete records" is admin-only.
             return $role === self::ADMIN;
         }
         if ($entity === 'settings' || $entity === 'periods') {
-            // settings write is admin-only; a period open/close is a periods
-            // write, and the user column of the matrix says no.
             return $role === self::ADMIN;
         }
-        // customers, customer_transactions, owners, identities, crm_devices
         return $kind === 'upsert';
     }
 
-    /** Enrolling a machine is "create/modify devices" — admin only. */
+    /**
+     * Every authenticated CRM user may enrol the machine they are currently
+     * logging in from. The enrol endpoint binds ownership to that same user;
+     * this capability is deliberately not permission to manage another
+     * user's devices.
+     */
     public static function canEnroll(string $role): bool
     {
-        return $role === self::ADMIN;
+        return self::isKnown($role);
     }
 
-    /** Running the one-shot import is admin only (spec §8, §7). */
+    /** Running bootstrap/legacy import remains admin-only. */
     public static function canImport(string $role): bool
     {
         return $role === self::ADMIN;
@@ -78,7 +80,7 @@ final class Roles
      * Assert a write capability or fail closed with 403 ROLE_FORBIDDEN.
      *
      * The message names the operation, never the record: a role refusal must
-     * not become a probe for what exists (spec §7, no IDOR oracle).
+     * not become a probe for what exists.
      *
      * @throws ApiException
      */
