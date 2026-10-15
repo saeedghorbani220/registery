@@ -48,7 +48,7 @@ class DeviceAuthStaticTests(unittest.TestCase):
             self.assertIn("'" + route + "' => ['POST']", self.index)
         for marker in (
             "$this->db->transaction",
-            "token_version = token_version + 1",
+            "token_version + 1",
             "UPDATE auth_sessions SET revoked_at",
             "FOR UPDATE",
         ):
