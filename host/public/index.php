@@ -32,7 +32,7 @@ define('HOST_ROOT', dirname(__DIR__));
 
 foreach ([
     'Schema', 'Database', 'Http', 'Ids', 'Config', 'Log', 'Tokens', 'Roles',
-    'RateLimit', 'Auth', 'Devices', 'Sync', 'Import',
+    'RateLimit', 'Auth', 'Devices', 'Sync', 'Import', 'Finance',
 ] as $classFile) {
     require_once HOST_ROOT . '/src/' . $classFile . '.php';
 }
@@ -99,6 +99,7 @@ try {
         '/sync/bootstrap' => ['GET'],
         '/sync/changes' => ['GET'],
         '/sync/mutations' => ['POST'],
+        '/finance/transactions/append' => ['POST'],
         '/bootstrap/import' => ['POST'],
         '/admin/backup' => ['POST'],
     ];
@@ -123,6 +124,7 @@ try {
     $devices = new Devices($db, $log, $config);
     $sync = new Sync($db, $log, $config);
     $import = new Import($db, $sync, $log, $config);
+    $finance = new Finance($db, $log, $config);
     $ip = $request->remoteAddr;
 
     if (!isset($knownPaths[$route])) {
@@ -266,6 +268,23 @@ try {
             }
             /** @var list<array<string, mixed>> $operations */
             $payload = $sync->mutations($operations, $context, $requestId);
+            $statusCode = 200;
+            $errorCode = '';
+            Response::ok($payload);
+            break;
+
+        case '/finance/transactions/append':
+            $device = requireDevice($auth, $request);
+            $body = $request->jsonBody();
+            $acting = $auth->actingUser($request);
+            $context = [
+                'device' => $device,
+                'user' => $acting,
+                'role' => $auth->effectiveRole([
+                    'device' => $device, 'user' => $acting,
+                ]),
+            ];
+            $payload = $finance->append($body, $context, $requestId);
             $statusCode = 200;
             $errorCode = '';
             Response::ok($payload);

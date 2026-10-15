@@ -28,6 +28,8 @@ class FinanceStaticTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = read(os.path.join(HOST, "src", "Finance.php"))
+        cls.index = read(os.path.join(HOST, "public", "index.php"))
+        cls.client = read(os.path.join(ROOT, "cloud_sync", "client.py"))
 
     def test_append_contract_is_transactional_and_integer_only(self):
         self.assertIn("$this->db->transaction", self.source)
@@ -38,6 +40,14 @@ class FinanceStaticTests(unittest.TestCase):
         self.assertIn("IDEMPOTENCY_MISMATCH", self.source)
         self.assertNotIn("floatval", self.source)
         self.assertNotIn("(float)", self.source)
+
+    def test_route_and_client_use_the_finance_append_boundary(self):
+        self.assertIn("'Finance'", self.index)
+        self.assertIn("'/finance/transactions/append' => ['POST']", self.index)
+        self.assertIn("$finance->append($body, $context, $requestId)", self.index)
+        self.assertIn("def append_ledger_transaction", self.client)
+        self.assertIn('route = "/finance/transactions/append"', self.client)
+
 
 
 class FinanceMariaDbTests(unittest.TestCase):

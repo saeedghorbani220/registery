@@ -725,6 +725,13 @@ class TestPush(ApiCase):
         self.assertEqual(self.api.row("crm_devices", "dev-uuid-1")
                          ["row_version"], 1)
 
+    def test_push_never_advances_the_durable_pull_cursor(self):
+        self.enrol()
+        before = self.config.cursor
+        result = self.client.push([self.operation()])
+        self.assertGreater(result.cursor, before)
+        self.assertEqual(self.config.cursor, before)
+
     def test_operation_id_is_minted_once_into_the_caller_dict(self):
         self.enrol()
         operation = self.operation()

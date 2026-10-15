@@ -645,6 +645,42 @@ class SyncClient(object):
         """``POST /admin/backup`` — triggers automated DB dump to Telegram on the host."""
         return self._request("POST", "/admin/backup", body={}, acting=True)
 
+    def append_ledger_transaction(self, customer_id, amount, *, note="",
+                                  kind="", image="", device_id=None,
+                                  operation_id=None):
+        """Append one monetary entry through the server serialization point.
+
+        This deliberately bypasses generic row CAS. Concurrent financial
+        intents from different desktops must both survive, so the host owns
+        sequence allocation and ``operation_id`` owns retry idempotency.
+        """
+        route = "/finance/transactions/append"
+        if self.config.dataset_epoch is None:
+            raise BootstrapRequiredError(route=route)
+        if not isinstance(customer_id, str) or not customer_id:
+            raise BadResponseError(route=route)
+        if isinstance(amount, bool) or not isinstance(amount, int):
+            raise BadResponseError(route=route)
+        if not all(isinstance(value, str) for value in (note, kind, image)):
+            raise BadResponseError(route=route)
+        if device_id is not None and (not isinstance(device_id, str)
+                                      or not device_id):
+            raise BadResponseError(route=route)
+        if operation_id is None:
+            operation_id = _ids.new_uuid()
+        if not isinstance(operation_id, str) or not operation_id:
+            raise BadResponseError(route=route)
+        body = {
+            "operation_id": operation_id,
+            "customer_id": customer_id,
+            "amount": amount,
+            "note": note,
+            "kind": kind,
+            "image": image,
+            "device_id": device_id,
+        }
+        return self._request("POST", route, body=body)
+
     def push(self, operations):
         """``POST /sync/mutations`` — batched push; conflicts come back as data.
 
@@ -699,13 +735,12 @@ class SyncClient(object):
             rows.append(Conflict(item["operation_id"], item["entity"],
                                  item["id"], item["server_version"],
                                  item.get("server_record")))
-        result = PushResult(applied, rows, cursor)
-        if result.cursor >= self.config.cursor:
-            # The server's cursor only ever moves forward; adopting it here is
-            # what keeps a pull after a push from re-reading what we just wrote.
-            self.config.set_cursor(result.cursor)
-            self.config.save()
-        return result
+        # A mutation response cursor is NOT a read checkpoint. Another desktop
+        # may have committed unseen changes between our previous pull cursor
+        # and this mutation. Advancing here would skip those rows forever.
+        # Only bootstrap/pull may advance the durable read cursor; replaying
+        # our own change on the next pull is safe because apply is versioned.
+        return PushResult(applied, rows, cursor)
 
     # ------------------------------------------------------------------
     def _bootstrap_state(self, payload, route):
