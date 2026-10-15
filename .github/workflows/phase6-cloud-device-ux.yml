@@ -8,6 +8,7 @@ on:
       - '.github/workflows/phase6-cloud-device-ux.yml'
       - 'lab/scripts/patch_phase6_cloud_device_ux_v2.py'
       - 'lab/scripts/fix_phase6_v2_counts.py'
+      - 'lab/scripts/fix_phase6_v2_test_anchor.py'
 
 permissions:
   contents: write
@@ -29,6 +30,7 @@ jobs:
       - name: Apply Phase 6 device UX patch
         run: |
           python lab/scripts/fix_phase6_v2_counts.py
+          python lab/scripts/fix_phase6_v2_test_anchor.py
           python lab/scripts/patch_phase6_cloud_device_ux_v2.py
       - name: Verify cloud UI and device client behavior
         run: >-
