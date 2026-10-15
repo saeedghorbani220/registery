@@ -19,7 +19,7 @@ jobs:
       mariadb:
         image: mariadb:11.4
         env:
-          MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: '1'
+          MARIADB_ROOT_PASSWORD: ci-${{ github.run_id }}
         ports:
           - 3307:3306
         options: >-
@@ -28,7 +28,7 @@ jobs:
           --health-timeout=5s
           --health-retries=20
     env:
-      IRICA_DB_ROOT_PASSWORD: ''
+      IRICA_DB_ROOT_PASSWORD: ci-${{ github.run_id }}
       IRICA_DB_HOST: 127.0.0.1
       IRICA_DB_PORT: '3307'
     steps:
