@@ -51,7 +51,6 @@ def main() -> None:
 '''
     new = '''    out = []
     seen = {}
-    last_seq = -1
     for change in changes:
         if not isinstance(change, dict):
             raise _bad(route)
@@ -69,9 +68,6 @@ def main() -> None:
             raise _bad(route)
         if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
             raise _bad(route)
-        if seq <= last_seq:
-            raise _bad(route)                  # server pages are strictly seq ordered
-        last_seq = seq
         if isinstance(row_version, bool) or not isinstance(row_version, int) \\
                 or row_version < 1:
             raise _bad(route)
@@ -80,13 +76,13 @@ def main() -> None:
         key = (entity, cloud_id)
         out_index = seen.get(key)
         if out_index is not None:
-            # A row may have several change_log entries after the cursor. The
-            # real host returns the current live snapshot for each entry while
-            # the executable fake preserves each historical snapshot. Both are
-            # valid representations of the same ordered log. Apply only the
-            # latest occurrence, but keep the first position so a parent first
-            # seen before its child remains before that child for reference
-            # resolution. The latest row_version is what version state records.
+            # One row may legitimately have several change_log entries after
+            # the caller's cursor. The real host returns the current live
+            # snapshot for each entry while the executable fake preserves the
+            # historical snapshots. In either representation the final entry
+            # is the state the client must apply. Keep the first occurrence's
+            # position so parent-before-child dependency order is preserved,
+            # but replace its payload/version with the latest occurrence.
             out[out_index] = (entity, cloud_id, row_version, record)
             continue
         seen[key] = len(out)
@@ -100,12 +96,12 @@ def main() -> None:
   resolve raises *before* a single byte is written — half a store is worse
   than none. :class:`mapper.UnresolvedReferenceError` is never caught, so
 '''
-    new = '''* **Fail closed**: an unknown entity, a malformed envelope, a change page
-  whose ``seq`` values are not strictly increasing, a record that does not
-  decode or a reference this machine cannot resolve raises *before* a single
-  byte is written — half a store is worse than none. Repeated row ids are
-  collapsed to their latest occurrence while retaining the first occurrence's
-  position, because one row may legitimately have several ordered log entries.
+    new = '''* **Fail closed**: an unknown entity, a malformed envelope, a record that
+  does not decode or a reference this machine cannot resolve raises *before*
+  a single byte is written — half a store is worse than none. Repeated row ids
+  in an incremental page are collapsed to their latest occurrence while
+  retaining the first occurrence's position, because one row may legitimately
+  have several ordered log entries after the cursor.
   :class:`mapper.UnresolvedReferenceError` is never caught, so
 '''
     replace_once(APPLY, old, new, "apply contract documentation")
@@ -138,15 +134,6 @@ def main() -> None:
         self.assertEqual(parsed, [
             ("owners", "same-id", 3, {"id": "owner01"}),
         ])
-
-    def test_change_page_sequence_must_be_strictly_increasing(self):
-        first = {"entity": "owners", "id": "one", "seq": 2,
-                 "row_version": 1, "record": {}}
-        second = {"entity": "customers", "id": "two", "seq": 1,
-                  "row_version": 1, "record": {}}
-        self.assertRejected(page(first, second), "change sequence")
-        self.assertRejected(page(first, dict(second, seq=2)),
-                            "duplicate change sequence")
 
 '''
     replace_once(TESTS, old, new, "repeated-row tests")
