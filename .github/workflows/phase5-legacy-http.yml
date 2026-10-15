@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/phase5-legacy-http.yml'
       - 'lab/scripts/patch_phase5_legacy_http.py'
+      - 'lab/scripts/patch_phase5_host_api_ci.py'
 
 permissions:
   contents: write
@@ -31,6 +32,7 @@ jobs:
       IRICA_DB_ROOT_PASSWORD: irica_ci_root
       IRICA_DB_HOST: 127.0.0.1
       IRICA_DB_PORT: '3307'
+      IRICA_TEST_DB_ACCOUNT_HOST: '%'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,7 +48,9 @@ jobs:
           echo "IRICA_MARIADB=$(command -v mariadb)" >> "$GITHUB_ENV"
           echo "IRICA_PHP=$(command -v php)" >> "$GITHUB_ENV"
       - name: Apply guarded legacy HTTP patch
-        run: python lab/scripts/patch_phase5_legacy_http.py
+        run: |
+          python lab/scripts/patch_phase5_legacy_http.py
+          python lab/scripts/patch_phase5_host_api_ci.py
       - name: Verify legacy service and real HTTP boundary
         run: >-
           python lab/scripts/run_panel_tests.py
