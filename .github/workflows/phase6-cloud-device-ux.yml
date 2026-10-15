@@ -1,0 +1,43 @@
+name: phase6-cloud-device-ux
+
+on:
+  push:
+    branches:
+      - 'feat/server-crm-v2-work'
+    paths:
+      - '.github/workflows/phase6-cloud-device-ux.yml'
+      - 'lab/scripts/patch_phase6_cloud_device_ux.py'
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-commit:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/server-crm-v2-work
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install lightweight test dependencies
+        run: python -m pip install --disable-pip-version-check requests
+      - name: Apply Phase 6 device UX patch
+        run: python lab/scripts/patch_phase6_cloud_device_ux.py
+      - name: Verify cloud UI and device client behavior
+        run: >-
+          python lab/scripts/run_panel_tests.py
+          test_cloud_ui
+          test_server_crm_v2_client_devices
+      - name: Commit verified production and test changes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add panel.py lab/tests/test_cloud_ui.py
+          git diff --cached --check
+          git commit -m "feat(cloud): expose device identity and reconnect state"
+          git push origin HEAD:feat/server-crm-v2-work
