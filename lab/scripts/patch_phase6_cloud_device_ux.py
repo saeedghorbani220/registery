@@ -9,16 +9,16 @@ PANEL = ROOT / "panel.py"
 TESTS = ROOT / "lab" / "tests" / "test_cloud_ui.py"
 
 
-def replace_once(path, old, new, label):
+def replace_exact(path, old, new, label, expected=1):
     text = path.read_text(encoding="utf-8")
     count = text.count(old)
-    if count != 1:
-        raise RuntimeError(f"{label}: expected one match, found {count}")
-    path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+    if count != expected:
+        raise RuntimeError(f"{label}: expected {expected} matches, found {count}")
+    path.write_text(text.replace(old, new), encoding="utf-8", newline="\n")
 
 
 def main():
-    replace_once(
+    replace_exact(
         PANEL,
         '''        "tenant_id": "",
         "device_enrolled": False,
@@ -31,7 +31,7 @@ def main():
 ''',
         "status shell device id",
     )
-    replace_once(
+    replace_exact(
         PANEL,
         '''        tenant_id=(getattr(config, "tenant_id", "") or ""),
         device_enrolled=bool(getattr(config, "sync_device_id", None)),
@@ -45,14 +45,17 @@ def main():
         "status payload device id",
     )
 
-    replace_once(
+    # panel.py carries two shipped cloud surfaces (the main panel and CRM).
+    # Both must render the same status contract, so these anchors are required
+    # to occur exactly twice rather than choosing one by accident.
+    replace_exact(
         PANEL,
         '''      '<div class="cloud-fact"><span class="cloud-fact-l">آخرین همگام‌سازی موفق</span><span class="cloud-fact-v" id="cloud-last-sync">—</span></div>'+''',
         '''      '<div class="cloud-fact"><span class="cloud-fact-l">این دستگاه</span><span class="cloud-fact-v cloud-code" id="cloud-device">ثبت‌نشده</span></div>'+\
       '<div class="cloud-fact"><span class="cloud-fact-l">آخرین همگام‌سازی موفق</span><span class="cloud-fact-v" id="cloud-last-sync">—</span></div>'+''',
-        "device fact shell",
+        "device fact shell", expected=2,
     )
-    replace_once(
+    replace_exact(
         PANEL,
         '''    '<div class="cloud-error" id="cloud-error-line" role="alert">'+ICON.alert+'<span id="cloud-error-text"></span></div>'+\
     '<div class="cloud-status" id="cloud-beat-line" role="status"></div>'+''',
@@ -61,9 +64,9 @@ def main():
       '<div><span class="cloud-banner-b">اتصال این دستگاه نیاز به بازسازی دارد</span>'+\
       '<p class="cloud-banner-p" id="cloud-reconnect-text"></p></div></div>'+\
     '<div class="cloud-status" id="cloud-beat-line" role="status"></div>'+''',
-        "reconnect notice shell",
+        "reconnect notice shell", expected=2,
     )
-    replace_once(
+    replace_exact(
         PANEL,
         '''  document.getElementById('cloud-actor-name').textContent=name;
   document.getElementById('cloud-last-sync').textContent=(s&&s.last_sync)?faDateTime(s.last_sync):'—';
@@ -75,9 +78,9 @@ def main():
   document.getElementById('cloud-device').title=deviceId;
   document.getElementById('cloud-last-sync').textContent=(s&&s.last_sync)?faDateTime(s.last_sync):'—';
 ''',
-        "paint device identity",
+        "paint device identity", expected=2,
     )
-    replace_once(
+    replace_exact(
         PANEL,
         '''  document.getElementById('cloud-error-text').textContent=msg;
   document.getElementById('cloud-beat-line').textContent=cloudBeatLine(s);
@@ -96,10 +99,10 @@ def main():
   }else{reconnectText.textContent='';}
   document.getElementById('cloud-beat-line').textContent=cloudBeatLine(s);
 ''',
-        "paint reconnect guidance",
+        "paint reconnect guidance", expected=2,
     )
 
-    replace_once(
+    replace_exact(
         TESTS,
         '''        self.assertEqual(payload["pending"], 3)
         self.assertEqual(payload["conflicts"], 2)
@@ -119,7 +122,7 @@ def main():
 ''',
         "status device test",
     )
-    replace_once(
+    replace_exact(
         TESTS,
         ''' 'cloud-error-code','cloud-error-line','cloud-beat-line','cloud-action-status',
  'cloud-sync-btn','cloud-logout-btn','cloud-login-block','cloud-user','cloud-pass',
@@ -129,7 +132,7 @@ def main():
 ''',
         "node ids",
     )
-    replace_once(
+    replace_exact(
         TESTS,
         ''' 'cloud-actor','cloud-last-sync','cloud-pending','cloud-conflicts',
  'cloud-error-code','cloud-error-line','cloud-beat-line','cloud-action-status',
@@ -139,7 +142,7 @@ def main():
 ''',
         "shell required ids",
     )
-    replace_once(
+    replace_exact(
         TESTS,
         '''              read_only:c.ro, pending:3, conflicts:c.conflicts||0,
               last_sync:'2026-10-05T10:00:00Z', error_code:null,
@@ -150,7 +153,7 @@ def main():
 ''',
         "paint fixture device id",
     )
-    replace_once(
+    replace_exact(
         TESTS,
         '''  ok(el('cloud-pill-text').textContent===c.label,
      c.name+': pill text is '+el('cloud-pill-text').textContent);
@@ -162,7 +165,7 @@ def main():
 ''',
         "paint device assertion",
     )
-    replace_once(
+    replace_exact(
         TESTS,
         '''ok(el('cloud-beat-line').textContent.indexOf('متوقف')>=0, 'no worker line');
 ''',
