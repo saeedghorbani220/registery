@@ -3,6 +3,49 @@
 All notable changes to this project are documented here.
 This project uses [Semantic Versioning](https://semver.org/).
 
+## [1.15.0] - 2026-10-15
+
+### Added
+
+- **Reviewed legacy CRM Migration Center for v1.13.1 and older stores.**
+  - Added a guarded admin-only browser workflow with server-side kill switch,
+    staging, duplicate/conflict review, explicit create/merge/skip/reject
+    decisions, source SHA-256 idempotency and atomic apply.
+  - Added PII-free before/after migration verification summaries and real
+    MariaDB reconciliation coverage for counts, balances, case stages and
+    customer/owner/device/period links.
+- **Multi-device account lifecycle hardening.**
+  - Normal users can self-enrol their own desktop machines; administrators can
+    revoke individual devices without terminating unrelated machines.
+  - Multiple PCs can use the same username concurrently, while distinct device
+    identities keep refresh-token families and revocation independent.
+  - The Cloud UI now shows the current device identity and actionable reconnect
+    guidance; a stale device id with a missing/revoked protected credential is
+    safely re-enrolled after a successful user login.
+
+### Changed
+
+- **Server-authoritative CRM synchronization is the default online workflow.**
+  Local JSON remains the robot-compatible cache/outbox rather than a second
+  authoritative database.
+- **Legacy financial import order is deterministic.** Transaction staging rows
+  are sorted by customer and legacy sequence before append-safe server sequence
+  allocation, preventing silent reordering of a customer's ledger.
+- **Database backups are now fully restorable.** The production backup generator
+  discovers every live base table, includes operational tables introduced by
+  forward migrations, preserves database triggers, and uses the configured
+  migration connection for controlled metadata reads when available.
+
+### Reliability and tests
+
+- Added real-MariaDB lock-wait retry verification proving bounded transaction
+  rollback/retry applies a mutation exactly once.
+- Added production backup -> second-database restore verification, including
+  table counts, legacy migration verification rows, financial data and the
+  restored sync-device ownership trigger.
+- Permanent CI now covers the server CRM schema, authentication, finance,
+  migration, database resilience, backup/restore and Windows cloud client flows.
+
 ## [1.14.0] - 2026-10-08
 
 ### Added

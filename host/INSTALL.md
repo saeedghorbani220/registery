@@ -69,7 +69,7 @@ Upload the whole `host/` folder **outside** `public_html`, e.g.
 /home/youruser/irica-host/
 ├── bin/           migrate.php, create-admin.php, create-user.php, smoke-test.php
 ├── config/        config.php goes here (you create it in step 3)
-├── migrations/    001_initial.sql, 002_server_crm_v2_foundation.sql, 003_server_crm_v2_device_auth.sql
+├── migrations/    001_initial.sql through 004_legacy_import_verification.sql
 ├── public/        ← the ONLY web-reachable directory
 ├── src/           PHP sources
 └── INSTALL.md  SECURITY.md
@@ -110,9 +110,11 @@ php -r 'echo bin2hex(random_bytes(32)), PHP_EOL;'   # paste into jwt_secret
 chmod 600 config/config.php
 ```
 
-Fill in every `REPLACE_…` value: `db.host`, `db.port`, `db.dbname`,
-`db.user`, `db.password`, and `db_migrate` (the privileged account from
-step 1, or `null` if you knowingly gave the app account DDL — don't).
+Fill in every `REPLACE_…` value under `db`. If the application account
+is correctly DML-only, set `db_migrate` to a **complete second database
+connection array** (`host`, `port`, `dbname`, `user`, `password`) for the
+privileged account from step 1. Use `null` only when the `db` account
+itself intentionally holds DDL privileges — not recommended.
 Config refuses to load while a placeholder is still present, and it refuses
 an all-zero `jwt_secret`.
 
@@ -300,8 +302,10 @@ version, no configuration and no dependency detail (spec §6).
    PHP ini. `smoke-test.php` and `public/index.php` both set
    `display_errors = 0` in code as well, so a missing directive degrades
    safely rather than exposing a stack trace.
-3. Remove shell access you do not need. The four `bin/` scripts are the
-   only CLI surface; they print no credential.
+3. Remove shell access you do not need. The five `bin/` scripts are the
+   supported CLI surface: migrate, create-admin, create-user, smoke-test
+   and backup-to-telegram. They do not print credentials except the
+   documented one-time generated account password during account setup.
 
 ---
 
@@ -401,9 +405,18 @@ live CRM tables manually to "finish" an interrupted job.
 ## 10. Backups, restore and rotation
 
 * **Back up the database nightly**, encrypted at rest, and *test a restore*.
-  The schema is forward-only: the restore path is "load the dump, then run
-  `php bin/migrate.php --status` and apply anything newer" — there is no
-  rollback script by design (spec §10.10).
+  `backup-to-telegram.php` discovers every live base table from
+  `information_schema` and includes database triggers, so operational
+  tables introduced by migrations 002/004 and the device-ownership
+  trigger from migration 003 are part of the dump. When `db_migrate` is
+  configured, backup uses that privileged connection for controlled
+  metadata reads while the runtime app account remains DML-only.
+* **Restore into a separate database before trusting a backup.** Load the
+  `.sql` dump, compare the source/restored base-table and trigger counts,
+  verify representative CRM/financial rows, then run
+  `php bin/migrate.php --status` against the restored database and apply
+  only genuinely newer migrations. The schema is forward-only; there is
+  no destructive down migration (spec §10.10).
 * Include `config/config.php` in the encrypted backup. Losing it is
   recoverable (you have the DB dump and the procedures below); leaking it is not.
 * **Rotation:**
