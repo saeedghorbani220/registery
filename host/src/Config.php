@@ -60,6 +60,28 @@ final class Config
         self::$path = '';
     }
 
+    /**
+     * Read one literal boolean directly from the active config source without
+     * executing the file or consulting the process cache. Security kill
+     * switches use this so edits take effect on the very next request even
+     * when PHP OPcache is configured not to revalidate scripts.
+     */
+    public static function freshBoolean(string $key, bool $default = false): bool
+    {
+        $file = self::$path !== '' ? self::$path : self::locate();
+        $source = @file_get_contents($file);
+        if (!is_string($source) || $source === '') {
+            return $default;
+        }
+        $quoted = preg_quote($key, '/');
+        $pattern = '/[\'\"]' . $quoted . '[\'\"]\s*=>\s*(true|false)\b/i';
+        $matched = preg_match($pattern, $source, $match);
+        if ($matched !== 1 || !isset($match[1])) {
+            return $default;
+        }
+        return strtolower((string) $match[1]) === 'true';
+    }
+
     public static function path(): string
     {
         return self::$path;

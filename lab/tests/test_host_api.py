@@ -402,6 +402,7 @@ return [
         'device_absolute_seconds' => 31536000,
     ],
     'idempotency_retention_days' => 30,
+    'legacy_import_enabled' => false,
     'rate_limit' => [
         'window_seconds' => 60,
         'delay_after' => 100,
@@ -440,23 +441,29 @@ def _provision():
     user_password = "Member-" + secrets.token_urlsafe(14)
     _passwords.update({root, app_password, admin_password, user_password})
 
-    # A clean slate every run: the module owns both objects.
+    # A clean slate every run: the module owns both objects. The default
+    # account host is production-like localhost. Container CI may opt into '%'
+    # because a service container sees the runner through its bridge address.
+    account_host = os.environ.get("IRICA_TEST_DB_ACCOUNT_HOST", "127.0.0.1")
+    if account_host not in ("127.0.0.1", "%"):
+        raise AssertionError("IRICA_TEST_DB_ACCOUNT_HOST has an unsupported value")
     _run_sql("DROP DATABASE IF EXISTS `%s`;" % API_DB, expect_ok=False)
-    _run_sql("DROP USER IF EXISTS '%s'@'127.0.0.1';" % API_USER,
+    _run_sql("DROP USER IF EXISTS '%s'@'%s';" % (API_USER, account_host),
              expect_ok=False)
     _run_sql("CREATE DATABASE `%s` DEFAULT CHARACTER SET utf8mb4"
              " COLLATE utf8mb4_unicode_ci;" % API_DB)
-    _run_sql("CREATE USER '%s'@'127.0.0.1' IDENTIFIED BY '%s';"
-             % (API_USER, app_password))
+    _run_sql("CREATE USER '%s'@'%s' IDENTIFIED BY '%s';"
+             % (API_USER, account_host, app_password))
     # Exactly the production grant set of spec §2: DML only, no CREATE.
     _run_sql("GRANT SELECT, INSERT, UPDATE, DELETE ON `%s`.* TO"
-             " '%s'@'127.0.0.1';" % (API_DB, API_USER))
+             " '%s'@'%s';" % (API_DB, API_USER, account_host))
     _run_sql("FLUSH PRIVILEGES;")
     # Registered the moment they exist: a failure later in provisioning must
     # still be able to drop them (tearDownClass will not run).
     _state["drop_sql"] = (
         "DROP DATABASE IF EXISTS `%s`;"
-        " DROP USER IF EXISTS '%s'@'127.0.0.1';" % (API_DB, API_USER))
+        " DROP USER IF EXISTS '%s'@'%s';"
+        % (API_DB, API_USER, account_host))
 
     directory = tempfile.mkdtemp(prefix="irica_host_api_")
     config_path, log_path = _write_config(directory, app_password,
@@ -733,9 +740,10 @@ class HostApiTest(unittest.TestCase):
         users, devices and sessions survive untouched.
         """
         tenant = _state["tenant_id"]
-        tables = ("crm_devices", "customer_transactions", "identities",
-                  "owners", "customers", "periods", "settings", "change_log",
-                  "idempotency_keys")
+        tables = ("legacy_import_decisions", "legacy_import_records",
+                  "legacy_import_jobs", "crm_devices", "customer_transactions",
+                  "identities", "owners", "customers", "periods", "settings",
+                  "change_log", "idempotency_keys")
         statements = ["SET FOREIGN_KEY_CHECKS = 0;"]
         statements += ["DELETE FROM `%s`.`%s` WHERE tenant_id = '%s';"
                        % (API_DB, table, tenant) for table in tables]
@@ -842,6 +850,80 @@ class HostApiTest(unittest.TestCase):
             self.assertEqual(actual, expected,
                              "isSecureTransport%s should be %s"
                              % (tuple(args), expected))
+
+    def test_legacy_migration_routes_are_default_off_admin_only_and_atomic(self):
+        store = {
+            "customers": [{
+                "id": "legacy01", "full_name": "Legacy HTTP Customer",
+                "address": "Old address", "mobile": "09121111111",
+                "notes": "", "created": "2026-01-01 12:00:00",
+                "transactions": [],
+            }],
+            "owners": [], "identities": [], "devices": [], "periods": [],
+        }
+        body = {
+            "source_text": json.dumps(store, ensure_ascii=False,
+                                      separators=(",", ":")),
+            "filename": "crm_store.json", "source_version": "1.13.1",
+        }
+        admin = _login(_state["admin_user"], _state["admin_password"])
+
+        # The endpoint exists but the migration window is closed by default.
+        status, error, _h, _p = _fail(
+            "POST", "/legacy-import/analyze", body,
+            token=admin["access_token"])
+        self.assertEqual((status, error["code"]), (403, "PERMISSION_DENIED"))
+
+        path = _state["config_path"]
+        with open(path, "r", encoding="utf-8") as handle:
+            original = handle.read()
+        enabled = original.replace(
+            "'legacy_import_enabled' => false,",
+            "'legacy_import_enabled' => true,", 1)
+        self.assertNotEqual(original, enabled, "fixture did not expose the migration switch")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(enabled)
+        try:
+            member = _login(_state["user_user"], _state["user_password"])
+            status, error, _h, _p = _fail(
+                "POST", "/legacy-import/analyze", body,
+                token=member["access_token"])
+            # Roles::requireImport uses the host's established role-matrix code.
+            self.assertEqual((status, error["code"]),
+                             (403, "ROLE_FORBIDDEN"))
+
+            analyzed, _h = _ok(
+                "POST", "/legacy-import/analyze", body,
+                token=admin["access_token"])
+            self.assertEqual(analyzed["job"]["status"], "ready")
+            job_id = analyzed["job"]["id"]
+
+            reviewed, _h = _ok(
+                "GET", "/legacy-import/review?job_id=" + job_id,
+                token=admin["access_token"])
+            self.assertEqual(reviewed["unresolved"], 0)
+            self.assertEqual(reviewed["counts"]["create"], 1)
+
+            applied, _h = _ok(
+                "POST", "/legacy-import/apply", {"job_id": job_id},
+                token=admin["access_token"])
+            self.assertEqual(applied["status"], "applied")
+            self.assertEqual(applied["counts"]["created"], 1)
+            self.assertEqual(_sql_value(
+                "SELECT COUNT(*) FROM customers WHERE tenant_id='%s';"
+                % _state["tenant_id"]), "1")
+
+            # Replay is a no-op and the staged source was never stored raw.
+            replay, _h = _ok(
+                "POST", "/legacy-import/apply", {"job_id": job_id},
+                token=admin["access_token"])
+            self.assertTrue(replay["replayed"])
+            self.assertEqual(_sql_value(
+                "SELECT COUNT(*) FROM customers WHERE tenant_id='%s';"
+                % _state["tenant_id"]), "1")
+        finally:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(original)
 
     # -- §5: login, rate limiting, refresh, enrolment --------------------
 
@@ -1741,13 +1823,19 @@ return [
                                          expect_ok=False)
             self.assertEqual(code, 0, first)
             self.assertIn("APPLY 001_initial", first)
+            migration_files = sorted(
+                name for name in os.listdir(os.path.join(HOST_DIR, "migrations"))
+                if name.endswith(".sql"))
             self.assertEqual(
                 _sql_value("SELECT COUNT(*) FROM `%s`.schema_migrations;"
-                           % SCRATCH_DB), "1")
+                           % SCRATCH_DB), str(len(migration_files)))
+            for filename in migration_files:
+                self.assertIn("APPLY " + os.path.splitext(filename)[0], first)
 
-            # The recorded checksum must match the file.
-            checksum = _sql_value("SELECT checksum FROM `%s`"
-                                  ".schema_migrations;" % SCRATCH_DB)
+            # The recorded checksum for 001 must match that exact file.
+            checksum = _sql_value(
+                "SELECT checksum FROM `%s`.schema_migrations "
+                "WHERE version='001_initial';" % SCRATCH_DB)
             with open(SCHEMA_SQL, "rb") as handle:
                 import hashlib
                 actual = hashlib.sha256(handle.read()).hexdigest()

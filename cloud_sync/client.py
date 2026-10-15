@@ -6,7 +6,8 @@ One class, :class:`SyncClient`, speaks the whole §6 contract over ``requests``:
 ===========  ==========================================================
 ``health``   ``GET  /health/live``            (no auth)
 ``login``    ``POST /auth/login``             -> user tokens, RAM only
-``enroll``   ``POST /sync-devices/enroll``    -> sync device id + refresh
+``enroll``   ``POST /sync-devices/self-enroll`` -> sync device id + refresh
+             (legacy ``/sync-devices/enroll`` fallback on 404)
 ``bootstrap````GET  /sync/bootstrap``          -> snapshot + cursor + epoch
 ``pull``     ``GET  /sync/changes?cursor=&limit=``
 ``push``     ``POST /sync/mutations``          -> applied[] + conflicts[]
@@ -42,6 +43,7 @@ from cloud_sync.config import load_config
 from cloud_sync.errors import (
     AuthRequiredError, AuthRevokedError, BadResponseError, HttpError,
     RequestTimeoutError, UnreachableError, UnresolvedReferenceCloudError,
+    BootstrapRequiredError, DatasetEpochMismatchError,
     code_for_status, envelope_code, parse_retry_after, safe_code,
     safe_request_id, AUTH_REQUIRED, AUTH_REVOKED, ENROL_REQUIRED,
 )
@@ -363,8 +365,8 @@ class SyncClient(object):
             return token
         if not self.vault.has_device_credentials:
             if not self.config.sync_device_id:
-                # Never enrolled: the remedy is /sync-devices/enroll, not a
-                # refresh (spec §5), and the panel must say which.
+                # Never enrolled: the remedy is self-enrolment, not a refresh
+                # (spec §5), and the panel must say which.
                 raise self._auth_failure("/sync/bootstrap",
                                          code=ENROL_REQUIRED)
             raise self._auth_failure("/auth/refresh")
@@ -464,24 +466,57 @@ class SyncClient(object):
             self.vault.clear_user()
 
     def enroll(self):
-        """``POST /sync-devices/enroll`` with the live user access token.
+        """Enrol this machine for the logged-in user.
+
+        Server CRM v2 uses ``/sync-devices/self-enroll`` for both normal users
+        and administrators. A 404 means an older v1 host, so only then do we
+        fall back to the historical admin-only ``/sync-devices/enroll`` route.
+        Other failures are preserved exactly; in particular a 403 is never
+        converted into a legacy retry.
 
         Persists ``sync_device_id`` in ``cloud_config.json`` and the device
         refresh token in ``auth.dat``, both immediately (spec §5).
         """
-        payload = self._request("POST", "/sync-devices/enroll", auth=True,
-                                allow_refresh=False, user_auth=True, body={})
+        route = "/sync-devices/self-enroll"
+        try:
+            payload = self._request(
+                "POST", route, auth=True, allow_refresh=False,
+                user_auth=True, body={})
+        except HttpError as exc:
+            if exc.status != 404:
+                raise
+            route = "/sync-devices/enroll"
+            payload = self._request(
+                "POST", route, auth=True, allow_refresh=False,
+                user_auth=True, body={})
         device_id = payload.get("sync_device_id")
         refresh = payload.get("device_refresh_token")
         if not isinstance(device_id, str) or not device_id \
                 or not isinstance(refresh, str) or not refresh:
-            raise BadResponseError(route="/sync-devices/enroll", status=200)
+            raise BadResponseError(route=route, status=200)
         self.vault.save_device_refresh(refresh)
         self.config.sync_device_id = device_id
         self.config.save()
         if callable(self.on_auth_ok):
             self.on_auth_ok()
         return payload
+
+    def revoke_device(self, sync_device_id):
+        """``POST /sync-devices/revoke`` for one owned machine."""
+        if not isinstance(sync_device_id, str) or not sync_device_id:
+            raise BadResponseError(route="/sync-devices/revoke")
+        return self._request(
+            "POST", "/sync-devices/revoke", auth=True, allow_refresh=False,
+            user_auth=True, body={"sync_device_id": sync_device_id})
+
+    def revoke_all_devices(self, user_id=None):
+        """Revoke own machines, or an admin-selected user's machines."""
+        if user_id is not None and (not isinstance(user_id, str) or not user_id):
+            raise BadResponseError(route="/sync-devices/revoke-all")
+        body = {} if user_id is None else {"user_id": user_id}
+        return self._request(
+            "POST", "/sync-devices/revoke-all", auth=True,
+            allow_refresh=False, user_auth=True, body=body)
 
     # ------------------------------------------------------------------
     # Endpoints (spec §6)
@@ -492,15 +527,23 @@ class SyncClient(object):
                              allow_refresh=False)
 
     def bootstrap(self):
-        """``GET /sync/bootstrap`` — full snapshot + cursor + dataset epoch.
+        """Fetch the authoritative snapshot without committing transport state.
 
-        The returned cursor is persisted so the first incremental pull resumes
-        exactly where the snapshot ended (spec §6.2: snapshot and cursor come
-        from one transaction, so nothing committed between them is missed).
+        The caller must first materialize the snapshot and persist its version
+        map, then call :meth:`commit_bootstrap`. Persisting the cursor here
+        would create a crash window where a restart skips a snapshot that was
+        never written to ``crm_store.json``.
         """
         payload = self._request("GET", "/sync/bootstrap")
-        self._remember_cursor(payload, "/sync/bootstrap")
+        self._bootstrap_state(payload, "/sync/bootstrap")
         return payload
+
+    def commit_bootstrap(self, payload):
+        """Durably mark an already-applied bootstrap snapshot as authoritative."""
+        cursor, epoch = self._bootstrap_state(payload, "/sync/bootstrap")
+        self.config.set_cursor(cursor, epoch)
+        self.config.save()
+        return cursor
 
     def pull(self, cursor=None, limit=CHANGE_PAGE_LIMIT):
         """``GET /sync/changes?cursor=&limit=`` — one page, never the whole log.
@@ -510,6 +553,8 @@ class SyncClient(object):
         (spec §6.2), so only ``seq > cursor`` is ever used.
         """
         from urllib.parse import urlencode
+        if self.config.dataset_epoch is None:
+            raise BootstrapRequiredError(route="/sync/changes")
         if cursor is None:
             cursor = self.config.cursor
         if isinstance(cursor, bool) or not isinstance(cursor, int) \
@@ -589,9 +634,9 @@ class SyncClient(object):
         The device credential is the principal (the route requires a device
         bearer) and the logged-in user's access token travels in
         ``X-Acting-User``, because the host refuses an import without an
-        acting identity and enrolment/import are admin-only. That token is
-        RAM-only, so an absent or expired session raises here instead of
-        sending a request the host can only reject.
+        acting identity and import is admin-only. That token is RAM-only, so an
+        absent or expired session raises here instead of sending a request the
+        host can only reject.
         """
         return self._request("POST", "/bootstrap/import", body=body,
                              acting=True)
@@ -599,6 +644,63 @@ class SyncClient(object):
     def trigger_backup(self):
         """``POST /admin/backup`` — triggers automated DB dump to Telegram on the host."""
         return self._request("POST", "/admin/backup", body={}, acting=True)
+
+    def append_ledger_transaction(self, customer_id, amount, *, note="",
+                                  kind="", image="", device_id=None,
+                                  operation_id=None):
+        """Append one monetary entry through the server serialization point.
+
+        This deliberately bypasses generic row CAS. Concurrent financial
+        intents from different desktops must both survive, so the host owns
+        sequence allocation and ``operation_id`` owns retry idempotency.
+        """
+        route = "/finance/transactions/append"
+        if self.config.dataset_epoch is None:
+            raise BootstrapRequiredError(route=route)
+        if not isinstance(customer_id, str) or not customer_id:
+            raise BadResponseError(route=route)
+        if isinstance(amount, bool) or not isinstance(amount, int):
+            raise BadResponseError(route=route)
+        if not all(isinstance(value, str) for value in (note, kind, image)):
+            raise BadResponseError(route=route)
+        if device_id is not None and (not isinstance(device_id, str)
+                                      or not device_id):
+            raise BadResponseError(route=route)
+        if operation_id is None:
+            operation_id = _ids.new_uuid()
+        if not isinstance(operation_id, str) or not operation_id:
+            raise BadResponseError(route=route)
+        body = {
+            "operation_id": operation_id,
+            "customer_id": customer_id,
+            "amount": amount,
+            "note": note,
+            "kind": kind,
+            "image": image,
+            "device_id": device_id,
+        }
+        return self._request("POST", route, body=body)
+
+    def void_ledger_transaction(self, transaction_id, reason, *,
+                                operation_id=None):
+        """Atomically void one ledger row and create its audit reversal."""
+        route = "/finance/transactions/void"
+        if self.config.dataset_epoch is None:
+            raise BootstrapRequiredError(route=route)
+        if not isinstance(transaction_id, str) or not transaction_id:
+            raise BadResponseError(route=route)
+        if not isinstance(reason, str) or not reason.strip() \
+                or len(reason.strip()) > 1000:
+            raise BadResponseError(route=route)
+        if operation_id is None:
+            operation_id = _ids.new_uuid()
+        if not isinstance(operation_id, str) or not operation_id:
+            raise BadResponseError(route=route)
+        return self._request("POST", route, body={
+            "operation_id": operation_id,
+            "transaction_id": transaction_id,
+            "reason": reason.strip(),
+        })
 
     def push(self, operations):
         """``POST /sync/mutations`` — batched push; conflicts come back as data.
@@ -608,6 +710,8 @@ class SyncClient(object):
         the id and the server replays its first result instead of applying the
         change twice (spec §6.1).
         """
+        if self.config.dataset_epoch is None:
+            raise BootstrapRequiredError(route="/sync/mutations")
         if not isinstance(operations, (list, tuple)) or not operations:
             raise BadResponseError(route="/sync/mutations")
         prepared = []
@@ -652,22 +756,28 @@ class SyncClient(object):
             rows.append(Conflict(item["operation_id"], item["entity"],
                                  item["id"], item["server_version"],
                                  item.get("server_record")))
-        result = PushResult(applied, rows, cursor)
-        if result.cursor >= self.config.cursor:
-            # The server's cursor only ever moves forward; adopting it here is
-            # what keeps a pull after a push from re-reading what we just wrote.
-            self.config.set_cursor(result.cursor)
-            self.config.save()
-        return result
+        # A mutation response cursor is NOT a read checkpoint. Another desktop
+        # may have committed unseen changes between our previous pull cursor
+        # and this mutation. Advancing here would skip those rows forever.
+        # Only bootstrap/pull may advance the durable read cursor; replaying
+        # our own change on the next pull is safe because apply is versioned.
+        return PushResult(applied, rows, cursor)
 
     # ------------------------------------------------------------------
-    def _remember_cursor(self, payload, route):
+    def _bootstrap_state(self, payload, route):
+        """Validate bootstrap commit metadata and refuse foreign datasets."""
+        if not isinstance(payload, dict):
+            raise BadResponseError(route=route, status=200)
         cursor = payload.get("cursor")
         if isinstance(cursor, bool) or not isinstance(cursor, int) \
-                or cursor < 0:
+                or cursor < 0 or "collections" not in payload:
             raise BadResponseError(route=route, status=200)
-        if "collections" not in payload:
+        epoch = payload.get("dataset_epoch")
+        if isinstance(epoch, bool) or not isinstance(epoch, (str, int)) \
+                or str(epoch).strip() == "":
             raise BadResponseError(route=route, status=200)
-        self.config.set_cursor(cursor, payload.get("dataset_epoch"))
-        self.config.save()
-        return cursor
+        epoch = str(epoch)
+        known = self.config.dataset_epoch
+        if known is not None and str(known) != epoch:
+            raise DatasetEpochMismatchError(route=route)
+        return cursor, epoch

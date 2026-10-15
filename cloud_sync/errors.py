@@ -39,7 +39,8 @@ __all__ = [
     "HTTP_409", "HTTP_429", "HTTP_500", "HTTP_ERROR", "SERVER_ERROR",
     "NET_TIMEOUT", "NET_UNREACHABLE", "QUEUE_FULL", "LEASE_EXPIRED",
     "IMPORT_REJECTED", "CONFIG_INVALID", "SECRET_UNAVAILABLE",
-    "TRANSITION_NOT_LEGAL", "REMOTE_NOT_READY",
+    "TRANSITION_NOT_LEGAL", "REMOTE_NOT_READY", "BOOTSTRAP_REQUIRED",
+    "DATASET_EPOCH_MISMATCH",
     # helpers
     "code_for_status", "is_retryable", "parse_retry_after",
     "envelope_code", "safe_request_id", "safe_code",
@@ -49,6 +50,7 @@ __all__ = [
     "AuthExpiredError", "AuthRevokedError", "BadResponseError",
     "RequestValidationError", "ConfigError", "SecretStoreError",
     "QueueFullError", "UnresolvedReferenceCloudError", "RemoteNotReadyError",
+    "BootstrapRequiredError", "DatasetEpochMismatchError",
 ]
 
 # =====================================================================
@@ -111,6 +113,11 @@ UNRESOLVED_REFERENCE = "UNRESOLVED_REFERENCE"
 #: The server dataset is not seeded or bootstrap is not marked done.
 #: The local non-empty store must not be wiped by an empty server snapshot.
 REMOTE_NOT_READY = "REMOTE_NOT_READY"
+#: This device has not durably applied a bootstrap snapshot yet.
+BOOTSTRAP_REQUIRED = "BOOTSTRAP_REQUIRED"
+#: The server identifies a different dataset generation than the one
+#: this local cache was materialized from. Never auto-adopt it.
+DATASET_EPOCH_MISMATCH = "DATASET_EPOCH_MISMATCH"
 
 #: Everything this client may emit. Includes every code workstream A documented
 #: as client-produced, plus the ones this transport needs on its own.
@@ -121,7 +128,8 @@ CLIENT_ERROR_CODES = frozenset({
     SERVER_ERROR, NET_TIMEOUT, NET_UNREACHABLE,
     QUEUE_FULL, LEASE_EXPIRED, IMPORT_REJECTED,
     CONFIG_INVALID, SECRET_UNAVAILABLE, TRANSITION_NOT_LEGAL,
-    UNRESOLVED_REFERENCE, REMOTE_NOT_READY,
+    UNRESOLVED_REFERENCE, REMOTE_NOT_READY, BOOTSTRAP_REQUIRED,
+    DATASET_EPOCH_MISMATCH,
 })
 
 
@@ -443,3 +451,15 @@ class RemoteNotReadyError(CloudSyncError):
     """
 
     code = REMOTE_NOT_READY
+
+
+class BootstrapRequiredError(CloudSyncError):
+    """A device must materialize the authoritative snapshot before push/pull."""
+
+    code = BOOTSTRAP_REQUIRED
+
+
+class DatasetEpochMismatchError(CloudSyncError):
+    """The remote dataset generation differs from the local cache authority."""
+
+    code = DATASET_EPOCH_MISMATCH
