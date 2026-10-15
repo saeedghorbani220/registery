@@ -32,7 +32,7 @@ define('HOST_ROOT', dirname(__DIR__));
 
 foreach ([
     'Schema', 'Database', 'Http', 'Ids', 'Config', 'Log', 'Tokens', 'Roles',
-    'RateLimit', 'Auth', 'Sync', 'Import',
+    'RateLimit', 'Auth', 'Devices', 'Sync', 'Import',
 ] as $classFile) {
     require_once HOST_ROOT . '/src/' . $classFile . '.php';
 }
@@ -93,6 +93,9 @@ try {
         '/auth/refresh' => ['POST'],
         '/auth/logout' => ['POST'],
         '/sync-devices/enroll' => ['POST'],
+        '/sync-devices/self-enroll' => ['POST'],
+        '/sync-devices/revoke' => ['POST'],
+        '/sync-devices/revoke-all' => ['POST'],
         '/sync/bootstrap' => ['GET'],
         '/sync/changes' => ['GET'],
         '/sync/mutations' => ['POST'],
@@ -117,6 +120,7 @@ try {
 
     $db = Database::fromConfig(Config::db());
     $auth = new Auth($db, $log, $config);
+    $devices = new Devices($db, $log, $config);
     $sync = new Sync($db, $log, $config);
     $import = new Import($db, $sync, $log, $config);
     $ip = $request->remoteAddr;
@@ -178,6 +182,49 @@ try {
             $body = $request->jsonBody(false);
             $principal = $auth->authenticate($request);
             $payload = $auth->enroll($principal, $body, $requestId, $ip);
+            $statusCode = 200;
+            $errorCode = '';
+            Response::ok($payload);
+            break;
+
+        case '/sync-devices/self-enroll':
+            $body = $request->jsonBody(false);
+            $principal = $auth->authenticate($request);
+            $payload = $devices->selfEnroll(
+                $principal, $body, $requestId, $ip
+            );
+            $statusCode = 200;
+            $errorCode = '';
+            Response::ok($payload);
+            break;
+
+        case '/sync-devices/revoke':
+            $body = $request->jsonBody();
+            $principal = $auth->authenticate($request);
+            $deviceId = $body['sync_device_id'] ?? null;
+            if (!is_string($deviceId)) {
+                throw new ApiException(400, Codes::BAD_PAYLOAD,
+                    'sync_device_id is required');
+            }
+            $payload = $devices->revoke(
+                $principal, $deviceId, $requestId, $ip
+            );
+            $statusCode = 200;
+            $errorCode = '';
+            Response::ok($payload);
+            break;
+
+        case '/sync-devices/revoke-all':
+            $body = $request->jsonBody(false);
+            $principal = $auth->authenticate($request);
+            $targetUserId = $body['user_id'] ?? null;
+            if ($targetUserId !== null && !is_string($targetUserId)) {
+                throw new ApiException(400, Codes::BAD_PAYLOAD,
+                    'user_id must be a UUID when supplied');
+            }
+            $payload = $devices->revokeAll(
+                $principal, $targetUserId, $requestId, $ip
+            );
             $statusCode = 200;
             $errorCode = '';
             Response::ok($payload);
