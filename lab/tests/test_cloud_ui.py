@@ -312,8 +312,13 @@ def _walk_keys(value):
 
 
 class _FakeVault:
-    def __init__(self, token="live-user-access-token"):
+    def __init__(self, token="live-user-access-token", device_credentials=True):
         self.user_access_token = token
+        self._device_credentials = bool(device_credentials)
+
+    @property
+    def has_device_credentials(self):
+        return self._device_credentials
 
     def clear_user(self):
         self.user_access_token = None
@@ -475,6 +480,17 @@ class StatusPayloadTests(unittest.TestCase):
         self.assertEqual(payload["error_message"],
                          panel.cloud_error_message("NET_TIMEOUT"))
 
+    def test_device_identity_is_visible_but_not_a_credential(self):
+        device_id = "12345678-1234-4234-8234-123456789abc"
+        payload = panel.cloud_status_payload(
+            _fake_runtime(config=_fake_config(api_base="https://api.x.test",
+                                              sync_device_id=device_id)))
+        self.assertTrue(payload["device_enrolled"])
+        self.assertEqual(payload["device_id"], device_id)
+        keys = " ".join(payload.keys()).lower()
+        self.assertNotIn("refresh", keys)
+        self.assertNotIn("token", keys)
+
     def test_an_unknown_but_valid_code_is_shown_with_generic_wording(self):
         # §9: the last error code stays observable, and an unfamiliar one
         # still gets safe wording rather than anybody's sentences.
@@ -623,8 +639,8 @@ var report={shell:null, states:[]};
 PAINT_CHECKS = r"""
 var IDS=['cloud-sync-section','cloud-pill','cloud-pill-icon','cloud-pill-text',
  'cloud-readonly-banner','cloud-must-change','cloud-actor','cloud-actor-name',
- 'cloud-last-sync','cloud-pending','cloud-conflicts','cloud-error-code',
- 'cloud-error-line','cloud-error-text','cloud-beat-line','cloud-action-status',
+ 'cloud-device','cloud-last-sync','cloud-pending','cloud-conflicts','cloud-error-code',
+ 'cloud-error-line','cloud-error-text','cloud-beat-line','cloud-reconnect','cloud-reconnect-text','cloud-action-status',
  'cloud-login-block','cloud-logout-btn','cloud-sync-btn','cloud-login-btn',
  'cloud-save-btn','cloud-conflicts-view'];
 
@@ -632,8 +648,8 @@ var IDS=['cloud-sync-section','cloud-pill','cloud-pill-icon','cloud-pill-text',
 freshDom(IDS);
 var shell=cloudShellHtml();
 ['cloud-sync-section','cloud-readonly-banner','cloud-must-change','cloud-pill',
- 'cloud-actor','cloud-last-sync','cloud-pending','cloud-conflicts',
- 'cloud-error-code','cloud-error-line','cloud-beat-line','cloud-action-status',
+ 'cloud-actor','cloud-device','cloud-last-sync','cloud-pending','cloud-conflicts',
+ 'cloud-error-code','cloud-error-line','cloud-beat-line','cloud-reconnect','cloud-reconnect-text','cloud-action-status',
  'cloud-sync-btn','cloud-logout-btn','cloud-login-block','cloud-user','cloud-pass',
  'cloud-api','cloud-tenant','cloud-save-btn','cloud-conflicts-view'
 ].forEach(function(id){
@@ -663,6 +679,7 @@ CASES.forEach(function(c){
   freshDom(IDS);
   CLOUD.last={ok:true, link:c.link, state:c.state, configured:c.configured,
               read_only:c.ro, pending:3, conflicts:c.conflicts||0,
+              device_id:'12345678-1234-4234-8234-123456789abc',
               last_sync:'2026-10-05T10:00:00Z', error_code:null,
               error_message:null, actor:null, must_change_password:false,
               worker:'running', worker_last:null};
@@ -671,6 +688,8 @@ CASES.forEach(function(c){
      c.name+': pill class is '+el('cloud-pill').className);
   ok(el('cloud-pill-text').textContent===c.label,
      c.name+': pill text is '+el('cloud-pill-text').textContent);
+  ok(el('cloud-device').textContent.indexOf('12345678')===0,
+     c.name+': device identity is not visible');
   ok(el('cloud-pill-icon').innerHTML.length>0,
      c.name+': the pill has no icon, so colour alone would carry the state');
   ok(el('cloud-readonly-banner').classList.contains('on')===!!c.ro,
@@ -699,6 +718,7 @@ CLOUD.last={link:'read_only',state:'read_only',configured:true,read_only:true,
 paintCloud();
 ok(el('cloud-readonly-banner').classList.contains('on'), 'banner not shown');
 ok(el('cloud-beat-line').textContent.indexOf('متوقف')>=0, 'no worker line');
+ok(el('cloud-reconnect').classList.contains('on'), 'read-only reconnect guidance hidden');
 
 /* --- must_change_password is a visible instruction ------------------ */
 freshDom(IDS);
@@ -999,6 +1019,21 @@ class CloudRouteTests(_GateHarness):
         self.assertTrue(payload["enrolled"])
         self.assertEqual(client.enrolled, 1)
         self.assertEqual(machine.events, ["enrol"])
+
+    def test_login_reenrols_when_device_id_is_stale_but_credential_is_gone(self):
+        machine = _ok_machine(SyncState.AUTH_REQUIRED)
+        config = _fake_config(api_base="https://api.x.test",
+                              sync_device_id="revoked-old-device")
+        client = _FakeClient(config=config,
+                             vault=_FakeVault("live", device_credentials=False))
+        status, payload = self._post_login(
+            _fake_runtime(machine=machine, config=config, client=client),
+            {"username": "u", "password": "p"})
+        self.assertEqual(status, 200)
+        self.assertEqual(client.enrolled, 1)
+        self.assertEqual(config.sync_device_id, "dev-1")
+        self.assertEqual(machine.events, ["auth_ok"])
+        self.assertTrue(payload["enrolled"])
 
     def test_signing_out_touches_only_the_session(self):
         machine = _ok_machine()
