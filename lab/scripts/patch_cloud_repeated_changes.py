@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-shot patch: accept identical repeated row snapshots in change pages."""
+"""One-shot patch: collapse repeated change-log rows to their latest state."""
 from __future__ import annotations
 
 import pathlib
@@ -51,6 +51,7 @@ def main() -> None:
 '''
     new = '''    out = []
     seen = {}
+    last_seq = -1
     for change in changes:
         if not isinstance(change, dict):
             raise _bad(route)
@@ -68,26 +69,27 @@ def main() -> None:
             raise _bad(route)
         if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
             raise _bad(route)
+        if seq <= last_seq:
+            raise _bad(route)                  # server pages are strictly seq ordered
+        last_seq = seq
         if isinstance(row_version, bool) or not isinstance(row_version, int) \\
                 or row_version < 1:
             raise _bad(route)
         if record is not None and not isinstance(record, dict):
             raise _bad(route)
         key = (entity, cloud_id)
-        previous = seen.get(key)
-        if previous is not None:
-            previous_version, previous_record, previous_seq = previous
-            # change_log stores ordering metadata, not historical payloads.
-            # Sync.php therefore returns the same current row snapshot for
-            # every log entry that names a row changed more than once. Keep
-            # the first occurrence so parent-before-child dependency order is
-            # preserved, but fail closed if a server sends inconsistent data.
-            if seq <= previous_seq or row_version != previous_version \\
-                    or record != previous_record:
-                raise _bad(route)
-            seen[key] = (previous_version, previous_record, seq)
+        out_index = seen.get(key)
+        if out_index is not None:
+            # A row may have several change_log entries after the cursor. The
+            # real host returns the current live snapshot for each entry while
+            # the executable fake preserves each historical snapshot. Both are
+            # valid representations of the same ordered log. Apply only the
+            # latest occurrence, but keep the first position so a parent first
+            # seen before its child remains before that child for reference
+            # resolution. The latest row_version is what version state records.
+            out[out_index] = (entity, cloud_id, row_version, record)
             continue
-        seen[key] = (row_version, record, seq)
+        seen[key] = len(out)
         out.append((entity, cloud_id, row_version, record))
     return out
 '''
@@ -98,12 +100,13 @@ def main() -> None:
   resolve raises *before* a single byte is written — half a store is worse
   than none. :class:`mapper.UnresolvedReferenceError` is never caught, so
 '''
-    new = '''* **Fail closed**: an unknown entity, a malformed envelope, inconsistent
-  repeated row snapshots, a record that does not decode or a reference this
-  machine cannot resolve raises *before* a single byte is written — half a
-  store is worse than none. Identical repeated snapshots are collapsed at
-  their first occurrence because the server change log stores ordering, not
-  historical payloads. :class:`mapper.UnresolvedReferenceError` is never caught, so
+    new = '''* **Fail closed**: an unknown entity, a malformed envelope, a change page
+  whose ``seq`` values are not strictly increasing, a record that does not
+  decode or a reference this machine cannot resolve raises *before* a single
+  byte is written — half a store is worse than none. Repeated row ids are
+  collapsed to their latest occurrence while retaining the first occurrence's
+  position, because one row may legitimately have several ordered log entries.
+  :class:`mapper.UnresolvedReferenceError` is never caught, so
 '''
     replace_once(APPLY, old, new, "apply contract documentation")
 
@@ -113,33 +116,37 @@ def main() -> None:
         self.assertRejected(page(row, dict(row, seq=2)), "duplicate")
 
 '''
-    new = '''    def test_identical_repeated_snapshots_keep_the_first_position(self):
+    new = '''    def test_repeated_row_keeps_first_position_but_latest_snapshot(self):
         first = {"entity": "owners", "id": "same-id", "seq": 1,
-                 "row_version": 2, "record": {"id": "owner01"}}
+                 "row_version": 2, "record": {"id": "owner01", "name": "old"}}
         middle = {"entity": "customers", "id": "other-id", "seq": 2,
                   "row_version": 1, "record": {"id": "cust01"}}
-        repeated = dict(first, seq=3)
+        repeated = dict(first, seq=3, row_version=3,
+                        record={"id": "owner01", "name": "latest"})
         parsed = apply._page_changes(
             page(first, middle, repeated), apply.CHANGES_ROUTE)
         self.assertEqual(parsed, [
-            ("owners", "same-id", 2, {"id": "owner01"}),
+            ("owners", "same-id", 3, {"id": "owner01", "name": "latest"}),
             ("customers", "other-id", 1, {"id": "cust01"}),
         ])
 
-    def test_inconsistent_repeated_snapshot_is_rejected(self):
+    def test_repeated_current_snapshot_with_same_version_is_collapsed(self):
         row = {"entity": "owners", "id": "same-id", "seq": 1,
-               "row_version": 1, "record": {}}
-        self.assertRejected(
-            page(row, dict(row, seq=2, row_version=2)),
-            "inconsistent repeated version")
-        self.assertRejected(
-            page(row, dict(row, seq=2, record={"id": "different"})),
-            "inconsistent repeated record")
+               "row_version": 3, "record": {"id": "owner01"}}
+        parsed = apply._page_changes(
+            page(row, dict(row, seq=2)), apply.CHANGES_ROUTE)
+        self.assertEqual(parsed, [
+            ("owners", "same-id", 3, {"id": "owner01"}),
+        ])
 
-    def test_repeated_snapshot_sequence_must_move_forward(self):
-        row = {"entity": "owners", "id": "same-id", "seq": 2,
-               "row_version": 1, "record": {}}
-        self.assertRejected(page(row, dict(row, seq=1)), "repeated sequence")
+    def test_change_page_sequence_must_be_strictly_increasing(self):
+        first = {"entity": "owners", "id": "one", "seq": 2,
+                 "row_version": 1, "record": {}}
+        second = {"entity": "customers", "id": "two", "seq": 1,
+                  "row_version": 1, "record": {}}
+        self.assertRejected(page(first, second), "change sequence")
+        self.assertRejected(page(first, dict(second, seq=2)),
+                            "duplicate change sequence")
 
 '''
     replace_once(TESTS, old, new, "repeated-row tests")
