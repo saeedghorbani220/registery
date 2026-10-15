@@ -162,7 +162,22 @@ final class Finance
                 [$tenantId, $normalized['customer_id']]
             ) ?? -1) + 1;
             $legacyId = Ids::transactionLegacyId($customerLegacy, $nextSeq);
-            $transactionId = $operationId;
+            $sourceInstallationId = $tx->queryValue(
+                'SELECT source_installation_id FROM tenant_state '
+                . 'WHERE tenant_id = ?',
+                [$tenantId]
+            );
+            if (!is_string($sourceInstallationId)
+                || !Ids::isUuid($sourceInstallationId)) {
+                throw new ApiException(409, Codes::VERSION_CONFLICT,
+                    'dataset authority has no source installation identity');
+            }
+            // Keep the row id compatible with mapper._minted_id(). The
+            // operation id is only the idempotency key; the record id remains
+            // uuid5(source installation, customer legacy id / server seq).
+            $transactionId = Ids::uuid5(
+                $sourceInstallationId, 'customer_transactions', $legacyId
+            );
 
             $tx->insert('customer_transactions', [
                 'id' => $transactionId,

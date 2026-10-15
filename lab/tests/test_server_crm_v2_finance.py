@@ -38,6 +38,8 @@ class FinanceStaticTests(unittest.TestCase):
         self.assertIn("is_bool($amount) || !is_int($amount)", self.source)
         self.assertIn("ON DUPLICATE KEY UPDATE operation_id = operation_id", self.source)
         self.assertIn("IDEMPOTENCY_MISMATCH", self.source)
+        self.assertIn("Ids::uuid5", self.source)
+        self.assertIn("source_installation_id FROM tenant_state", self.source)
         self.assertNotIn("floatval", self.source)
         self.assertNotIn("(float)", self.source)
 
@@ -65,6 +67,7 @@ class FinanceMariaDbTests(unittest.TestCase):
         cls.tenant = str(uuid.uuid4())
         cls.user = str(uuid.uuid4())
         cls.customer = str(uuid.uuid4())
+        cls.source_installation = str(uuid.uuid4())
         cls._sql("CREATE DATABASE `%s` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" % cls.db, select_db=False)
         try:
             for filename in MIGRATION_FILES:
@@ -117,6 +120,7 @@ class FinanceMariaDbTests(unittest.TestCase):
             "INSERT INTO tenants (id,slug,name,status,created_at,updated_at) VALUES ('%s','finance-v2','Finance Test','active','%s','%s');" % (cls.tenant, now, now),
             "INSERT INTO users (id,tenant_id,username,password_hash,display_name,must_change_password,status,token_version,row_version,created_at,updated_at) VALUES ('%s','%s','finance-user','test-hash-not-a-credential','',0,'active',1,1,'%s','%s');" % (cls.user, cls.tenant, now, now),
             "INSERT INTO memberships (id,tenant_id,user_id,role,created_at,updated_at) VALUES ('%s','%s','%s','user','%s','%s');" % (membership, cls.tenant, cls.user, now, now),
+            "INSERT INTO tenant_state (tenant_id,dataset_epoch,bootstrap_status,source_installation_id,created_at,updated_at) VALUES ('%s',1,'done','%s','%s','%s');" % (cls.tenant, cls.source_installation, now, now),
             "INSERT INTO customers (id,tenant_id,legacy_id,row_version,created_at,updated_at,full_name) VALUES ('%s','%s','cust-finance',1,'%s','%s','Finance Customer');" % (cls.customer, cls.tenant, now, now),
         ])
         cls._sql(sql)
@@ -179,9 +183,11 @@ class FinanceMariaDbTests(unittest.TestCase):
         self.assertTrue(all(code == 0 and payload["ok"] for code, payload in results))
         ids = [payload["result"]["transaction"]["id"] for _code, payload in results]
         seqs = [payload["result"]["transaction"]["record"]["seq"] for _code, payload in results]
-        self.assertEqual(ids, [op, op])
+        self.assertEqual(ids[0], ids[1])
+        self.assertNotEqual(ids[0], op)
+        self.assertRegex(ids[0], r"^[0-9a-f-]{36}$")
         self.assertEqual(seqs[0], seqs[1])
-        self.assertEqual(self.scalar("SELECT COUNT(*) FROM customer_transactions WHERE id='%s';" % op), "1")
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM customer_transactions WHERE id='%s';" % ids[0]), "1")
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM change_log WHERE operation_id='%s';" % op), "1")
 
     def test_reusing_operation_id_with_different_money_is_rejected(self):
@@ -189,11 +195,12 @@ class FinanceMariaDbTests(unittest.TestCase):
         code, first = self._append(op, 300, "same-op")
         self.assertEqual(code, 0)
         self.assertTrue(first["ok"])
+        tx_id = first["result"]["transaction"]["id"]
         code, second = self._append(op, 301, "same-op")
         self.assertNotEqual(code, 0)
         self.assertEqual((second["status"], second["code"]), (409, "IDEMPOTENCY_MISMATCH"))
-        self.assertEqual(self.scalar("SELECT COUNT(*) FROM customer_transactions WHERE id='%s';" % op), "1")
-        self.assertEqual(self.scalar("SELECT amount FROM customer_transactions WHERE id='%s';" % op), "300")
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM customer_transactions WHERE id='%s';" % tx_id), "1")
+        self.assertEqual(self.scalar("SELECT amount FROM customer_transactions WHERE id='%s';" % tx_id), "300")
 
     def test_non_integer_amount_is_rejected_without_a_row(self):
         # The service itself receives the invalid value through a tiny direct
@@ -218,7 +225,7 @@ class FinanceMariaDbTests(unittest.TestCase):
         run = subprocess.run([self.php, path, op, "1", "float"], capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, cwd=ROOT, timeout=120)
         payload = json.loads((run.stdout or "").strip().splitlines()[-1])
         self.assertEqual((payload["status"], payload["code"]), (400, "VALIDATION_FAILED"))
-        self.assertEqual(self.scalar("SELECT COUNT(*) FROM customer_transactions WHERE id='%s';" % op), "0")
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM change_log WHERE operation_id='%s';" % op), "0")
 
 
 if __name__ == "__main__":
