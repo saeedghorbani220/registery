@@ -7,7 +7,7 @@ on:
     paths:
       - '.github/workflows/phase6-cloud-device-ux.yml'
       - 'lab/scripts/patch_phase6_cloud_device_ux_v3.py'
-      - 'lab/scripts/fix_phase6_v3_test_insertion.py'
+      - 'lab/scripts/fix_phase6_v3_complete_anchor.py'
 
 permissions:
   contents: write
@@ -28,7 +28,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check requests
       - name: Apply Phase 6 device UX patch
         run: |
-          python lab/scripts/fix_phase6_v3_test_insertion.py
+          python lab/scripts/fix_phase6_v3_complete_anchor.py
           python lab/scripts/patch_phase6_cloud_device_ux_v3.py
       - name: Verify cloud UI and device client behavior
         run: >-
