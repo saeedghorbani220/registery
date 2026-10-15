@@ -1,0 +1,46 @@
+name: phase5-legacy-page
+
+on:
+  push:
+    branches:
+      - 'feat/server-crm-v2-work'
+    paths:
+      - '.github/workflows/phase5-legacy-page.yml'
+      - 'lab/scripts/patch_phase5_legacy_page.py'
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/server-crm-v2-work
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install PHP CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y php-cli
+          echo "IRICA_PHP=$(command -v php)" >> "$GITHUB_ENV"
+      - name: Apply legacy migration center patch
+        run: python lab/scripts/patch_phase5_legacy_page.py
+      - name: Verify page security and delivery
+        run: python lab/scripts/run_panel_tests.py test_server_crm_v2_legacy_page
+      - name: Lint page assets
+        run: |
+          php -l host/public/legacy-import.php
+          node --check host/public/legacy-import.js
+      - name: Commit verified changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add host/public/legacy-import.php host/public/legacy-import.css host/public/legacy-import.js lab/tests/test_server_crm_v2_legacy_page.py .github/workflows/server-crm-v2.yml
+          git diff --cached --check
+          git commit -m "feat(migration): add guarded legacy migration center"
+          git push origin HEAD:feat/server-crm-v2-work
