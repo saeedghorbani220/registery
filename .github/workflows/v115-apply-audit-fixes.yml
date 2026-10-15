@@ -1,0 +1,68 @@
+name: v115-apply-audit-fixes
+
+on:
+  push:
+    branches:
+      - 'audit/server-crm-v1.15.0'
+    paths:
+      - '.github/workflows/v115-apply-audit-fixes.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-verify-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: irica_fix_root
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      IRICA_DB_ROOT_PASSWORD: irica_fix_root
+      IRICA_DB_HOST: 127.0.0.1
+      IRICA_DB_PORT: '3307'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/server-crm-v1.15.0
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mariadb-client php-cli php-mysql php-mbstring
+          echo "IRICA_MARIADB=$(command -v mariadb)" >> "$GITHUB_ENV"
+          echo "IRICA_PHP=$(command -v php)" >> "$GITHUB_ENV"
+      - name: Apply audited fixes
+        run: python lab/scripts/patch_v115_audit_fixes.py
+      - name: Verify focused regressions
+        run: >-
+          python lab/scripts/run_panel_tests.py
+          test_server_crm_v2_legacy_page
+          test_server_crm_v2_legacy_apply
+          test_server_crm_v2_schema
+          test_v115_audit_config_switch
+      - name: Lint patched host files
+        run: |
+          php -l host/src/Config.php
+          php -l host/src/Schema.php
+          git diff --check
+      - name: Commit only production fixes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add host/src/Config.php host/src/Schema.php
+          git diff --cached --check
+          git commit -m "fix(host): harden config switch and schema ranges"
+          git push origin HEAD:audit/server-crm-v1.15.0
