@@ -69,11 +69,12 @@ jobs:
           sudo apt-get install -y mariadb-client php-cli php-mysql
           echo "IRICA_MARIADB=$(command -v mariadb)" >> "$GITHUB_ENV"
           echo "IRICA_PHP=$(command -v php)" >> "$GITHUB_ENV"
-      - name: Verify v2 schema and device auth on real MariaDB
+      - name: Verify v2 schema, device auth and finance on real MariaDB
         run: >-
           python lab/scripts/run_panel_tests.py
           test_server_crm_v2_schema
           test_server_crm_v2_device_auth
+          test_server_crm_v2_finance
       - name: Lint host PHP entry points
         run: |
           find host -type f -name '*.php' -print0 | xargs -0 -n1 php -l
