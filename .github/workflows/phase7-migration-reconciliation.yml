@@ -1,0 +1,50 @@
+name: phase7-migration-reconciliation
+
+on:
+  push:
+    branches:
+      - 'feat/server-crm-v2-work'
+    paths:
+      - '.github/workflows/phase7-migration-reconciliation.yml'
+      - 'lab/scripts/patch_phase7_migration_reconciliation.py'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: irica_ci_root
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      IRICA_DB_ROOT_PASSWORD: irica_ci_root
+      IRICA_DB_HOST: 127.0.0.1
+      IRICA_DB_PORT: '3307'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/server-crm-v2-work
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install MariaDB client and PHP CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mariadb-client php-cli php-mysql
+          echo "IRICA_MARIADB=$(command -v mariadb)" >> "$GITHUB_ENV"
+          echo "IRICA_PHP=$(command -v php)" >> "$GITHUB_ENV"
+      - name: Apply Phase 7 reconciliation test patch
+        run: python lab/scripts/patch_phase7_migration_reconciliation.py
+      - name: Verify reviewed migration reconciliation on real MariaDB
+        run: python lab/scripts/run_panel_tests.py test_server_crm_v2_legacy_apply
