@@ -33,6 +33,7 @@ define('HOST_ROOT', dirname(__DIR__));
 foreach ([
     'Schema', 'Database', 'Http', 'Ids', 'Config', 'Log', 'Tokens', 'Roles',
     'RateLimit', 'Auth', 'Devices', 'Sync', 'Import', 'Finance',
+    'LegacyImport', 'LegacyApply',
 ] as $classFile) {
     require_once HOST_ROOT . '/src/' . $classFile . '.php';
 }
@@ -101,6 +102,10 @@ try {
         '/sync/mutations' => ['POST'],
         '/finance/transactions/append' => ['POST'],
         '/finance/transactions/void' => ['POST'],
+        '/legacy-import/analyze' => ['POST'],
+        '/legacy-import/review' => ['GET'],
+        '/legacy-import/decision' => ['POST'],
+        '/legacy-import/apply' => ['POST'],
         '/bootstrap/import' => ['POST'],
         '/admin/backup' => ['POST'],
     ];
@@ -126,6 +131,8 @@ try {
     $sync = new Sync($db, $log, $config);
     $import = new Import($db, $sync, $log, $config);
     $finance = new Finance($db, $log, $config);
+    $legacyImport = new LegacyImport($db, $sync, $log, $config);
+    $legacyApply = new LegacyApply($db, $sync, $log, $config);
     $ip = $request->remoteAddr;
 
     if (!isset($knownPaths[$route])) {
@@ -137,7 +144,8 @@ try {
     }
 
     $limitBody = (int) ($config['limits']['max_body_bytes'] ?? 1048576);
-    if ($route !== '/bootstrap/import' && $request->rawBody !== ''
+    $largeBodyRoutes = ['/bootstrap/import', '/legacy-import/analyze'];
+    if (!in_array($route, $largeBodyRoutes, true) && $request->rawBody !== ''
         && strlen($request->rawBody) > $limitBody) {
         throw new ApiException(413, Codes::PAYLOAD_TOO_LARGE,
             'request body exceeds the configured limit');
@@ -308,6 +316,57 @@ try {
             Response::ok($payload);
             break;
 
+        case '/legacy-import/analyze':
+            $user = requireUser($auth, $request);
+            requireLegacyImportEnabled($config);
+            $body = $request->jsonBody();
+            $payload = $legacyImport->analyze(
+                $user, $body, $requestId, $ip
+            );
+            $statusCode = 200;
+            $errorCode = '';
+            Response::ok($payload);
+            break;
+
+        case '/legacy-import/review':
+            $user = requireUser($auth, $request);
+            requireLegacyImportEnabled($config);
+            $jobId = stringQuery($request, 'job_id');
+            $payload = $legacyApply->review($user, $jobId);
+            $statusCode = 200;
+            $errorCode = '';
+            Response::ok($payload);
+            break;
+
+        case '/legacy-import/decision':
+            $user = requireUser($auth, $request);
+            requireLegacyImportEnabled($config);
+            $body = $request->jsonBody();
+            $payload = $legacyApply->decide(
+                $user, $body, $requestId, $ip
+            );
+            $statusCode = 200;
+            $errorCode = '';
+            Response::ok($payload);
+            break;
+
+        case '/legacy-import/apply':
+            $user = requireUser($auth, $request);
+            requireLegacyImportEnabled($config);
+            $body = $request->jsonBody();
+            $jobId = $body['job_id'] ?? null;
+            if (!is_string($jobId) || !Ids::isUuid($jobId)) {
+                throw new ApiException(400, Codes::BAD_PAYLOAD,
+                    'job_id must be a UUID');
+            }
+            $payload = $legacyApply->apply(
+                $user, $jobId, $requestId, $ip
+            );
+            $statusCode = 200;
+            $errorCode = '';
+            Response::ok($payload);
+            break;
+
         case '/bootstrap/import':
             $device = requireDevice($auth, $request);
             $acting = $auth->actingUser($request);
@@ -415,6 +474,45 @@ function requireDevice(Auth $auth, Request $request): Principal
  *
  * @throws ApiException 400
  */
+/**
+ * Require a live user bearer for browser/admin endpoints.
+ *
+ * @throws ApiException 401
+ */
+function requireUser(Auth $auth, Request $request): Principal
+{
+    $principal = $auth->authenticate($request);
+    if (!$principal->isUser()) {
+        throw new ApiException(401, Codes::AUTH_REQUIRED,
+            'a user access token is required for this endpoint');
+    }
+    return $principal;
+}
+
+/** @throws ApiException 403 */
+function requireLegacyImportEnabled(array $_config): void
+{
+    if (!Config::freshBoolean('legacy_import_enabled', false)) {
+        throw new ApiException(403, Codes::PERMISSION_DENIED,
+            'legacy migration is disabled on this host');
+    }
+}
+
+/** @throws ApiException 400 */
+function stringQuery(Request $request, string $key): string
+{
+    if (!array_key_exists($key, $request->query)) {
+        throw new ApiException(400, Codes::BAD_PAYLOAD,
+            $key . ' is required');
+    }
+    $raw = $request->query[$key];
+    if (is_array($raw) || !is_string($raw) || $raw === '' || strlen($raw) > 128) {
+        throw new ApiException(400, Codes::BAD_PAYLOAD,
+            $key . ' must be a non-empty string');
+    }
+    return $raw;
+}
+
 function intQuery(Request $request, string $key, ?int $default): ?int
 {
     if (!array_key_exists($key, $request->query)) {
