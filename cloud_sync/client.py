@@ -43,6 +43,7 @@ from cloud_sync.config import load_config
 from cloud_sync.errors import (
     AuthRequiredError, AuthRevokedError, BadResponseError, HttpError,
     RequestTimeoutError, UnreachableError, UnresolvedReferenceCloudError,
+    BootstrapRequiredError, DatasetEpochMismatchError,
     code_for_status, envelope_code, parse_retry_after, safe_code,
     safe_request_id, AUTH_REQUIRED, AUTH_REVOKED, ENROL_REQUIRED,
 )
@@ -526,15 +527,23 @@ class SyncClient(object):
                              allow_refresh=False)
 
     def bootstrap(self):
-        """``GET /sync/bootstrap`` — full snapshot + cursor + dataset epoch.
+        """Fetch the authoritative snapshot without committing transport state.
 
-        The returned cursor is persisted so the first incremental pull resumes
-        exactly where the snapshot ended (spec §6.2: snapshot and cursor come
-        from one transaction, so nothing committed between them is missed).
+        The caller must first materialize the snapshot and persist its version
+        map, then call :meth:`commit_bootstrap`. Persisting the cursor here
+        would create a crash window where a restart skips a snapshot that was
+        never written to ``crm_store.json``.
         """
         payload = self._request("GET", "/sync/bootstrap")
-        self._remember_cursor(payload, "/sync/bootstrap")
+        self._bootstrap_state(payload, "/sync/bootstrap")
         return payload
+
+    def commit_bootstrap(self, payload):
+        """Durably mark an already-applied bootstrap snapshot as authoritative."""
+        cursor, epoch = self._bootstrap_state(payload, "/sync/bootstrap")
+        self.config.set_cursor(cursor, epoch)
+        self.config.save()
+        return cursor
 
     def pull(self, cursor=None, limit=CHANGE_PAGE_LIMIT):
         """``GET /sync/changes?cursor=&limit=`` — one page, never the whole log.
@@ -544,6 +553,8 @@ class SyncClient(object):
         (spec §6.2), so only ``seq > cursor`` is ever used.
         """
         from urllib.parse import urlencode
+        if self.config.dataset_epoch is None:
+            raise BootstrapRequiredError(route="/sync/changes")
         if cursor is None:
             cursor = self.config.cursor
         if isinstance(cursor, bool) or not isinstance(cursor, int) \
@@ -642,6 +653,8 @@ class SyncClient(object):
         the id and the server replays its first result instead of applying the
         change twice (spec §6.1).
         """
+        if self.config.dataset_epoch is None:
+            raise BootstrapRequiredError(route="/sync/mutations")
         if not isinstance(operations, (list, tuple)) or not operations:
             raise BadResponseError(route="/sync/mutations")
         prepared = []
@@ -695,13 +708,20 @@ class SyncClient(object):
         return result
 
     # ------------------------------------------------------------------
-    def _remember_cursor(self, payload, route):
+    def _bootstrap_state(self, payload, route):
+        """Validate bootstrap commit metadata and refuse foreign datasets."""
+        if not isinstance(payload, dict):
+            raise BadResponseError(route=route, status=200)
         cursor = payload.get("cursor")
         if isinstance(cursor, bool) or not isinstance(cursor, int) \
-                or cursor < 0:
+                or cursor < 0 or "collections" not in payload:
             raise BadResponseError(route=route, status=200)
-        if "collections" not in payload:
+        epoch = payload.get("dataset_epoch")
+        if isinstance(epoch, bool) or not isinstance(epoch, (str, int)) \
+                or str(epoch).strip() == "":
             raise BadResponseError(route=route, status=200)
-        self.config.set_cursor(cursor, payload.get("dataset_epoch"))
-        self.config.save()
-        return cursor
+        epoch = str(epoch)
+        known = self.config.dataset_epoch
+        if known is not None and str(known) != epoch:
+            raise DatasetEpochMismatchError(route=route)
+        return cursor, epoch

@@ -1331,6 +1331,8 @@ CLOUD_ERROR_MESSAGES = {
     "DATASET_NOT_EMPTY": "داده‌های میزبان خالی نیست؛ امکان انتقال مجدد وجود ندارد.",
     "IMPORT_CONFLICT": "شناسه یا محتوای انتقال با نسخه قبلی همخوانی ندارد.",
     "REMOTE_NOT_READY": "سرور ابری هنوز آماده نیست یا پرونده‌ها به آن منتقل نشده‌اند.",
+    "BOOTSTRAP_REQUIRED": "ابتدا همگام‌سازی اولیه با سرور باید کامل شود",
+    "DATASET_EPOCH_MISMATCH": "نسخهٔ دیتابیس سرور با کش این سیستم متفاوت است؛ همگام‌سازی برای جلوگیری از بازنویسی متوقف شد",
 }
 
 #: A code that fits the grammar but is unknown to this build: still generic
@@ -1828,6 +1830,19 @@ def cloud_worker_beat():
             return _cloud_note_beat(skipped="awaiting_login")
         if lease.is_expired():
             return _cloud_stop_for_lease(runtime)
+        # A fresh/legacy client must materialize server authority before
+        # the outbox is allowed to send its first mutation. This also repairs
+        # old configs that had a cursor but pre-date dataset_epoch tracking.
+        pull_result = None
+        if (getattr(runtime["config"], "sync_device_id", None)
+                and getattr(runtime["config"], "dataset_epoch", None) is None):
+            try:
+                pull_result = cloud_pull_step(runtime)
+            except CloudSyncError as exc:
+                return _cloud_note_beat(code=exc.code)
+            if pull_result.get("skipped"):
+                return _cloud_note_beat(skipped=pull_result.get("skipped"))
+
         worker = runtime["worker"]
         previous = worker.bind_auth()
         try:
@@ -1836,8 +1851,8 @@ def cloud_worker_beat():
             worker.unbind_auth(previous)
         _cloud_save_machine(runtime)
 
-        pull_result = None
-        if (getattr(runtime["config"], "sync_device_id", None)
+        if (pull_result is None
+                and getattr(runtime["config"], "sync_device_id", None)
                 and hasattr(runtime.get("client"), "pull_all")
                 and not lease.is_expired()
                 and getattr(outcome, "code", None) not in _CLOUD_AUTH_CODES
@@ -2156,7 +2171,7 @@ def cloud_pull_step(runtime=None):
 
     pulled_pages = 0
     with crm_mod.STORE_LOCK:
-        if getattr(config, "cursor", 0) == 0:
+        if getattr(config, "dataset_epoch", None) is None:
             snapshot = client.bootstrap()
             try:
                 apply.apply_snapshot(
@@ -2168,7 +2183,12 @@ def cloud_pull_step(runtime=None):
                 )
             except RemoteNotReadyError:
                 return {"pulled": 0, "skipped": "remote_not_ready"}
+            # Cross-file commit order is deliberate: local CRM bytes first
+            # (inside apply_snapshot), then row versions, and only then the
+            # cursor/epoch marker. A crash can cause a harmless re-bootstrap,
+            # but can never make a restart skip an unapplied snapshot.
             _save_cloud_versions(versions, versions_path)
+            client.commit_bootstrap(snapshot)
             pulled_pages = 1
         else:
             def _handler(page):

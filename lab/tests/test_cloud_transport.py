@@ -202,9 +202,11 @@ class ApiCase(DataDirCase):
 
     # -- helpers --------------------------------------------------------
     def enrol(self):
-        """Log in as the fake admin and enrol this machine (spec §5)."""
+        """Log in, enrol, then commit the initial authoritative snapshot."""
         self.client.login(fake_api.FAKE_USERNAME, fake_api.FAKE_PASSWORD)
         self.client.enroll()
+        snapshot = self.client.bootstrap()
+        self.client.commit_bootstrap(snapshot)
         self.user_token = self.vault.user_access_token
         return self.config.sync_device_id
 
@@ -212,7 +214,8 @@ class ApiCase(DataDirCase):
         """Populate the device access token so the next 401 is a real one."""
         if not self.config.sync_device_id:
             self.enrol()
-        self.client.bootstrap()
+        snapshot = self.client.bootstrap()
+        self.client.commit_bootstrap(snapshot)
         self.api.requests.clear()
         self.api.clear_faults()
         self.vault.clear_user()
@@ -591,6 +594,11 @@ class TestBootstrapAndPull(ApiCase):
         self.assertIn("customers", payload["collections"])
         self.assertEqual(payload["cursor"], self.api.seq)
         self.assertEqual(payload["dataset_epoch"], self.api.dataset_epoch)
+        # Fetching a snapshot alone must not advance durable state. The fixture
+        # already committed an empty bootstrap, so its cursor remains zero
+        # until this newer snapshot is explicitly materialized/committed.
+        self.assertEqual(self.config.cursor, 0)
+        self.client.commit_bootstrap(payload)
         self.assertEqual(self.config.cursor, self.api.seq)
 
     def test_pull_resumes_across_has_more_pages(self):
