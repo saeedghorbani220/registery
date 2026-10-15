@@ -39,6 +39,7 @@ jobs:
           test_server_crm_v2_client_devices
           test_server_crm_v2_authority
           test_server_crm_v2_finance_outbox
+          test_server_crm_v2_finance_transport
 
   host-foundation:
     runs-on: ubuntu-latest
@@ -77,6 +78,7 @@ jobs:
           test_server_crm_v2_device_auth
           test_server_crm_v2_finance
           test_server_crm_v2_finance_void
+          test_server_crm_v2_finance_transport
       - name: Lint host PHP entry points
         run: |
           find host -type f -name '*.php' -print0 | xargs -0 -n1 php -l
