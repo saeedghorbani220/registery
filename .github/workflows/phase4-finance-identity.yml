@@ -1,0 +1,59 @@
+name: phase4-finance-identity
+
+on:
+  push:
+    branches:
+      - 'feat/server-crm-v2-work'
+    paths:
+      - '.github/workflows/phase4-finance-identity.yml'
+      - 'lab/scripts/patch_phase4_finance_identity.py'
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: irica_ci_root
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      IRICA_DB_ROOT_PASSWORD: irica_ci_root
+      IRICA_DB_HOST: 127.0.0.1
+      IRICA_DB_PORT: '3307'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/server-crm-v2-work
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mariadb-client php-cli php-mysql
+          echo "IRICA_MARIADB=$(command -v mariadb)" >> "$GITHUB_ENV"
+          echo "IRICA_PHP=$(command -v php)" >> "$GITHUB_ENV"
+      - run: python lab/scripts/patch_phase4_finance_identity.py
+      - name: Verify concurrent finance identity
+        run: python lab/scripts/run_panel_tests.py test_server_crm_v2_finance
+      - run: php -l host/src/Finance.php
+      - name: Commit verified changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add host/src/Finance.php lab/tests/test_server_crm_v2_finance.py
+          git diff --cached --check
+          git commit -m "fix(finance): keep ledger row ids compatible with mapper"
+          git push origin HEAD:feat/server-crm-v2-work
