@@ -37,6 +37,7 @@ jobs:
           test_cloud_integration
           test_cloud_online_mode_and_backup
           test_server_crm_v2_client_devices
+          test_server_crm_v2_authority
 
   host-foundation:
     runs-on: ubuntu-latest
