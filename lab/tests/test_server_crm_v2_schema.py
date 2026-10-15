@@ -75,7 +75,7 @@ class FoundationStaticTests(unittest.TestCase):
         self.assertIn("CHECK (issues_json IS NULL OR json_valid(issues_json))", self.sql)
         self.assertRegex(
             self.sql,
-            r"resolution\s+VARCHAR\(24\).*?'create'.*?'merge'.*?'skip'.*?'reject'",
+            r"(?s)resolution\s+VARCHAR\(24\).*?'create'.*?'merge'.*?'skip'.*?'reject'",
         )
 
     def test_import_job_error_is_code_not_free_text(self):
