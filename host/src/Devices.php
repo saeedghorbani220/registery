@@ -7,8 +7,9 @@
  * user's machine(s). CRM business rows themselves have no row-owner model.
  *
  * Security properties:
- *   * self-enrolment binds owner_user_id and enrolled_by in the same SQL
- *     transaction that creates the first device refresh session;
+ *   * self-enrolment writes enrolled_by in the same SQL transaction that
+ *     creates the first device refresh session; migration 003 mirrors that
+ *     value into owner_user_id before the INSERT completes;
  *   * revocation changes the device status, bumps token_version and revokes
  *     every refresh family for that device before the transaction commits;
  *   * a non-admin querying somebody else's device receives 404, not an
@@ -61,6 +62,9 @@ final class Devices
             $principal, $deviceId, $familyId, $refreshToken, $name,
             $now, $nowEpoch, $idle, $absolute
         ): void {
+            // Database::insert remains constrained by Schema.php. Migration
+            // 003's BEFORE INSERT trigger copies enrolled_by to owner_user_id
+            // within this exact transaction before the row becomes visible.
             $tx->insert('sync_devices', [
                 'id' => $deviceId,
                 'tenant_id' => $principal->tenantId,
@@ -70,7 +74,6 @@ final class Devices
                 'created_at' => $now,
                 'updated_at' => $now,
                 'enrolled_by' => $principal->userId,
-                'owner_user_id' => $principal->userId,
             ]);
             $tx->insert('auth_sessions', [
                 'id' => Ids::v4(),
