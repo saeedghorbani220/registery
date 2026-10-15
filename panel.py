@@ -12851,7 +12851,10 @@ class Handler(BaseHTTPRequestHandler):
                     txs = record.get("transactions", [])
                     if 0 <= tx_index < len(txs):
                         tx_rec = {**txs[tx_index], "seq": tx_index, "customer_id": record.get("id")}
-                        _cloud_enqueue_mutation("customer_transactions", f"{record.get('id')}/{tx_index}", tx_rec)
+                        _cloud_enqueue_mutation(
+                            "customer_transactions",
+                            f"{record.get('id')}/{tx_index}", tx_rec,
+                            transport="finance_void")
             elif entity == "owner":
                 if action in ("add", "update") and isinstance(record, dict):
                     _cloud_enqueue_mutation("owners", record.get("id"), record)

@@ -100,6 +100,7 @@ try {
         '/sync/changes' => ['GET'],
         '/sync/mutations' => ['POST'],
         '/finance/transactions/append' => ['POST'],
+        '/finance/transactions/void' => ['POST'],
         '/bootstrap/import' => ['POST'],
         '/admin/backup' => ['POST'],
     ];
@@ -285,6 +286,23 @@ try {
                 ]),
             ];
             $payload = $finance->append($body, $context, $requestId);
+            $statusCode = 200;
+            $errorCode = '';
+            Response::ok($payload);
+            break;
+
+        case '/finance/transactions/void':
+            $device = requireDevice($auth, $request);
+            $body = $request->jsonBody();
+            $acting = $auth->actingUser($request);
+            $context = [
+                'device' => $device,
+                'user' => $acting,
+                'role' => $auth->effectiveRole([
+                    'device' => $device, 'user' => $acting,
+                ]),
+            ];
+            $payload = $finance->void($body, $context, $requestId);
             $statusCode = 200;
             $errorCode = '';
             Response::ok($payload);

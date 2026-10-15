@@ -681,6 +681,27 @@ class SyncClient(object):
         }
         return self._request("POST", route, body=body)
 
+    def void_ledger_transaction(self, transaction_id, reason, *,
+                                operation_id=None):
+        """Atomically void one ledger row and create its audit reversal."""
+        route = "/finance/transactions/void"
+        if self.config.dataset_epoch is None:
+            raise BootstrapRequiredError(route=route)
+        if not isinstance(transaction_id, str) or not transaction_id:
+            raise BadResponseError(route=route)
+        if not isinstance(reason, str) or not reason.strip() \
+                or len(reason.strip()) > 1000:
+            raise BadResponseError(route=route)
+        if operation_id is None:
+            operation_id = _ids.new_uuid()
+        if not isinstance(operation_id, str) or not operation_id:
+            raise BadResponseError(route=route)
+        return self._request("POST", route, body={
+            "operation_id": operation_id,
+            "transaction_id": transaction_id,
+            "reason": reason.strip(),
+        })
+
     def push(self, operations):
         """``POST /sync/mutations`` — batched push; conflicts come back as data.
 

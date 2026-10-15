@@ -68,6 +68,7 @@ _MAX_LINE_BYTES = 4 * 1024 * 1024
 #: Transport marker for a *new* customer ledger append. Updates/voids keep
 #: using generic CAS; only creation needs server-side sequence serialization.
 _FINANCE_APPEND_TRANSPORT = "finance_append"
+_FINANCE_VOID_TRANSPORT = "finance_void"
 
 
 # =====================================================================
@@ -715,10 +716,18 @@ class OutboxWorker(object):
 
     # -- transport routing ----------------------------------------------
     @staticmethod
-    def _is_finance_append(entry):
+    def _finance_transport(entry):
         operation = getattr(entry, "operation", None)
-        return (isinstance(operation, dict)
-                and operation.get("transport") == _FINANCE_APPEND_TRANSPORT)
+        if not isinstance(operation, dict):
+            return None
+        marker = operation.get("transport")
+        if marker in (_FINANCE_APPEND_TRANSPORT, _FINANCE_VOID_TRANSPORT):
+            return marker
+        return None
+
+    @classmethod
+    def _is_finance_special(cls, entry):
+        return cls._finance_transport(entry) is not None
 
     def _transport_batch(self, ready, limit):
         """Preserve queue order while isolating serialized finance appends.
@@ -731,18 +740,22 @@ class OutboxWorker(object):
         bounded = ready[:limit]
         if not bounded:
             return []
-        if self._is_finance_append(bounded[0]):
+        if self._is_finance_special(bounded[0]):
             return [bounded[0]]
         prefix = []
         for entry in bounded:
-            if self._is_finance_append(entry):
+            if self._is_finance_special(entry):
                 break
             prefix.append(entry)
         return prefix
 
     def _push_batch(self, batch):
-        if len(batch) == 1 and self._is_finance_append(batch[0]):
-            return self._push_finance_append(batch[0])
+        if len(batch) == 1:
+            marker = self._finance_transport(batch[0])
+            if marker == _FINANCE_APPEND_TRANSPORT:
+                return self._push_finance_append(batch[0])
+            if marker == _FINANCE_VOID_TRANSPORT:
+                return self._push_finance_void(batch[0])
         return self.client.push([entry.operation for entry in batch])
 
     def _push_finance_append(self, entry):
@@ -777,6 +790,32 @@ class OutboxWorker(object):
         if not isinstance(transaction, dict) \
                 or not isinstance(transaction.get("id"), str) \
                 or not transaction["id"] \
+                or isinstance(cursor, bool) or not isinstance(cursor, int):
+            raise BadResponseError(code=SERVER_ERROR)
+        return _AppliedBatchResult(entry.operation_id, cursor)
+
+    def _push_finance_void(self, entry):
+        operation = entry.operation
+        if operation.get("kind") != "upsert" \
+                or operation.get("entity") != "customer_transactions":
+            raise BadResponseError(code=SERVER_ERROR)
+        transaction_id = operation.get("id")
+        record = operation.get("record")
+        if not isinstance(transaction_id, str) or not transaction_id \
+                or not isinstance(record, dict):
+            raise BadResponseError(code=SERVER_ERROR)
+        reason = record.get("void_reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise BadResponseError(code=SERVER_ERROR)
+        payload = self.client.void_ledger_transaction(
+            transaction_id, reason, operation_id=entry.operation_id)
+        original = payload.get("original") if isinstance(payload, dict) else None
+        reversal = payload.get("reversal") if isinstance(payload, dict) else None
+        cursor = payload.get("cursor") if isinstance(payload, dict) else None
+        if not isinstance(original, dict) or original.get("id") != transaction_id \
+                or not isinstance(reversal, dict) \
+                or not isinstance(reversal.get("id"), str) \
+                or not reversal["id"] \
                 or isinstance(cursor, bool) or not isinstance(cursor, int):
             raise BadResponseError(code=SERVER_ERROR)
         return _AppliedBatchResult(entry.operation_id, cursor)

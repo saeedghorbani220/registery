@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Outbox routing contract for server-authoritative financial appends."""
+"""Outbox routing contract for server-authoritative financial writes."""
 import os
 import tempfile
 import types
@@ -33,6 +33,18 @@ class FakeClient:
             "cursor": self.cursor,
         }
 
+    def void_ledger_transaction(self, transaction_id, reason, **kwargs):
+        self.events.append(("void", transaction_id, reason, dict(kwargs)))
+        self.cursor += 2
+        return {
+            "original": {"id": transaction_id, "row_version": 2},
+            "reversal": {
+                "id": "44444444-4444-5444-8444-444444444444",
+                "row_version": 1,
+            },
+            "cursor": self.cursor,
+        }
+
 
 def finance_op(customer="22222222-2222-5222-8222-222222222222", amount=500):
     return {
@@ -48,6 +60,27 @@ def finance_op(customer="22222222-2222-5222-8222-222222222222", amount=500):
             "kind": "receipt",
             "image": "",
             "device_id": None,
+        },
+    }
+
+
+def finance_void_op(reason="operator correction"):
+    return {
+        "kind": "upsert",
+        "entity": "customer_transactions",
+        "id": "55555555-5555-5555-8555-555555555555",
+        "base_version": 1,
+        "transport": "finance_void",
+        "record": {
+            "seq": 2,
+            "customer_id": "22222222-2222-5222-8222-222222222222",
+            "amount": 700,
+            "note": "old",
+            "kind": "receipt",
+            "image": "",
+            "device_id": None,
+            "voided_at": "2026-10-15T17:00:00+00:00",
+            "void_reason": reason,
         },
     }
 
@@ -100,6 +133,29 @@ class FinanceOutboxTests(unittest.TestCase):
         self.assertEqual(self.client.events[2], ("generic", [third_id]))
         self.assertEqual(self.outbox.pending_count, 0)
 
+    def test_finance_void_reuses_outbox_operation_id_and_is_settled(self):
+        operation_id = self.outbox.enqueue(finance_void_op())
+        outcome = self.worker.run_once()
+        self.assertEqual(outcome.applied, 1)
+        self.assertEqual(self.outbox.pending_count, 0)
+        event = self.client.events[0]
+        self.assertEqual(event[0], "void")
+        self.assertEqual(event[1], "55555555-5555-5555-8555-555555555555")
+        self.assertEqual(event[2], "operator correction")
+        self.assertEqual(event[3]["operation_id"], operation_id)
+
+    def test_finance_void_isolated_between_generic_batches(self):
+        first_id = self.outbox.enqueue(generic_op("cust-before-void"))
+        void_id = self.outbox.enqueue(finance_void_op())
+        third_id = self.outbox.enqueue(generic_op("cust-after-void"))
+        self.worker.run_once()
+        self.assertEqual(self.client.events[0], ("generic", [first_id]))
+        self.worker.run_once()
+        self.assertEqual(self.client.events[1][0], "void")
+        self.assertEqual(self.client.events[1][3]["operation_id"], void_id)
+        self.worker.run_once()
+        self.assertEqual(self.client.events[2], ("generic", [third_id]))
+
     def test_only_explicit_transport_marker_uses_finance(self):
         operation = finance_op()
         operation.pop("transport")
@@ -114,18 +170,21 @@ class PanelFinanceTagTests(unittest.TestCase):
         with open(os.path.join(ROOT, "panel.py"), "r", encoding="utf-8") as handle:
             cls.panel = handle.read()
 
-    def test_only_new_transaction_enqueue_is_tagged_for_finance(self):
+    def test_new_and_void_transactions_have_distinct_finance_transports(self):
         self.assertIn(
             'def _cloud_enqueue_mutation(entity, legacy_id, record=None, kind="upsert", transport=None):',
             self.panel,
         )
         self.assertIn('op["transport"] = str(transport)', self.panel)
         self.assertEqual(self.panel.count('transport="finance_append"'), 1)
-        marker = self.panel.index('transport="finance_append"')
-        void_marker = self.panel.index('elif action == "void_tx"', marker)
-        self.assertLess(marker, void_marker)
-        void_window = self.panel[void_marker:void_marker + 900]
-        self.assertNotIn('transport="finance_append"', void_window)
+        self.assertEqual(self.panel.count('transport="finance_void"'), 1)
+        append_marker = self.panel.index('transport="finance_append"')
+        void_action = self.panel.index('elif action == "void_tx"', append_marker)
+        void_marker = self.panel.index('transport="finance_void"', void_action)
+        self.assertLess(append_marker, void_action)
+        self.assertLess(void_action, void_marker)
+        self.assertNotIn('transport="finance_append"',
+                         self.panel[void_action:void_action + 1000])
 
 
 if __name__ == "__main__":
