@@ -8,6 +8,7 @@ on:
       - '.github/workflows/phase5-legacy-http.yml'
       - 'lab/scripts/patch_phase5_legacy_http.py'
       - 'lab/scripts/patch_phase5_host_api_ci.py'
+      - 'lab/scripts/patch_phase5_http_role_test.py'
 
 permissions:
   contents: write
@@ -51,6 +52,7 @@ jobs:
         run: |
           python lab/scripts/patch_phase5_legacy_http.py
           python lab/scripts/patch_phase5_host_api_ci.py
+          python lab/scripts/patch_phase5_http_role_test.py
       - name: Verify legacy service and real HTTP boundary
         run: >-
           python lab/scripts/run_panel_tests.py
