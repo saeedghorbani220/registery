@@ -331,6 +331,39 @@ final class LegacyApply
             foreach ($staged as $row) {
                 $byEntity[(string) $row['entity']][] = $row;
             }
+            // customer_transactions receive a new server sequence while the
+            // customer ledger is locked. Preserve the legacy per-customer
+            // array order before allocating those new sequence numbers; SQL
+            // row order is otherwise undefined and can silently swap entries.
+            if (isset($byEntity['customer_transactions'])) {
+                usort($byEntity['customer_transactions'],
+                    static function (array $left, array $right): int {
+                        $leftRecord = json_decode((string) $left['record_json'], true);
+                        $rightRecord = json_decode((string) $right['record_json'], true);
+                        $leftCustomer = is_array($leftRecord)
+                            && is_string($leftRecord['customer_id'] ?? null)
+                            ? $leftRecord['customer_id'] : '';
+                        $rightCustomer = is_array($rightRecord)
+                            && is_string($rightRecord['customer_id'] ?? null)
+                            ? $rightRecord['customer_id'] : '';
+                        $customerOrder = strcmp($leftCustomer, $rightCustomer);
+                        if ($customerOrder !== 0) {
+                            return $customerOrder;
+                        }
+                        $leftSeq = is_array($leftRecord)
+                            && is_int($leftRecord['seq'] ?? null)
+                            ? $leftRecord['seq'] : PHP_INT_MAX;
+                        $rightSeq = is_array($rightRecord)
+                            && is_int($rightRecord['seq'] ?? null)
+                            ? $rightRecord['seq'] : PHP_INT_MAX;
+                        if ($leftSeq !== $rightSeq) {
+                            return $leftSeq <=> $rightSeq;
+                        }
+                        return strcmp((string) $left['source_key'],
+                            (string) $right['source_key']);
+                    }
+                );
+            }
 
             /** @var array<string, string> $sourceMap */
             $sourceMap = [];
