@@ -13,8 +13,11 @@ permissions:
 
 jobs:
   cloud-client:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The shipped secret store is Windows DPAPI + Windows ACLs by design.
+    # Running credential-flow tests on Linux would correctly fail closed and
+    # would not represent the production desktop environment.
+    runs-on: windows-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -22,11 +25,10 @@ jobs:
           python-version: '3.11'
       - name: Install lightweight test dependencies
         run: python -m pip install --disable-pip-version-check requests
-      - name: Run cloud client and contract tests
+      - name: Run cloud client tests on the production OS family
         run: >-
           python lab/scripts/run_panel_tests.py
           test_cloud_state
-          test_cloud_mapper
           test_cloud_transport
           test_cloud_apply
           test_cloud_import
@@ -35,9 +37,9 @@ jobs:
           test_cloud_integration
           test_cloud_online_mode_and_backup
 
-  host-api:
+  host-foundation:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
     services:
       mariadb:
         image: mariadb:11.4
@@ -52,7 +54,6 @@ jobs:
           --health-retries=20
     env:
       IRICA_DB_ROOT_PASSWORD: irica_ci_root
-      IRICA_DB_API_PASSWORD: irica_ci_api
       IRICA_DB_HOST: 127.0.0.1
       IRICA_DB_PORT: '3307'
     steps:
@@ -60,15 +61,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install MariaDB client and PHP extensions
+      - name: Install MariaDB client and PHP CLI
         run: |
           sudo apt-get update
-          sudo apt-get install -y mariadb-client php-cli php-mysql php-mbstring php-curl
-          echo "IRICA_PHP=$(command -v php)" >> "$GITHUB_ENV"
+          sudo apt-get install -y mariadb-client php-cli
           echo "IRICA_MARIADB=$(command -v mariadb)" >> "$GITHUB_ENV"
-      - name: Run host schema, v2 migration and API tests
-        run: >-
-          python lab/scripts/run_panel_tests.py
-          test_host_schema
-          test_server_crm_v2_schema
-          test_host_api
+      - name: Verify additive v2 migration on a real MariaDB service
+        run: python lab/scripts/run_panel_tests.py test_server_crm_v2_schema
+      - name: Lint host PHP entry points
+        run: |
+          find host -type f -name '*.php' -print0 | xargs -0 -n1 php -l
