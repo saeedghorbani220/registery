@@ -1,0 +1,103 @@
+name: v115-full-audit
+
+on:
+  push:
+    branches:
+      - 'audit/server-crm-v1.15.0'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-full-regression:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install lightweight dependencies
+        run: python -m pip install --disable-pip-version-check requests
+      - name: Compile changed Python surfaces
+        run: python -m compileall -q cloud_sync panel.py crm.py panel_auth.py
+      - name: Run complete historical regression suite
+        run: python lab/scripts/run_panel_tests.py
+      - name: Run every v1.15 client-side/new integration module
+        run: >-
+          python lab/scripts/run_panel_tests.py
+          test_server_crm_v2_authority
+          test_server_crm_v2_client_devices
+          test_server_crm_v2_finance_outbox
+          test_server_crm_v2_finance_transport
+          test_cloud_state
+          test_cloud_mapper
+          test_cloud_transport
+          test_cloud_apply
+          test_cloud_import
+          test_cloud_ui
+          test_cloud_conflicts
+          test_cloud_integration
+          test_cloud_online_mode_and_backup
+
+  linux-host-deep-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: irica_audit_root
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      IRICA_DB_ROOT_PASSWORD: irica_audit_root
+      IRICA_DB_HOST: 127.0.0.1
+      IRICA_DB_PORT: '3307'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mariadb-client php-cli php-mysql php-mbstring
+          echo "IRICA_MARIADB=$(command -v mariadb)" >> "$GITHUB_ENV"
+          echo "IRICA_PHP=$(command -v php)" >> "$GITHUB_ENV"
+      - name: Static integrity checks
+        run: |
+          git diff --check origin/main...HEAD
+          python -m compileall -q cloud_sync panel.py crm.py
+          find host -type f -name '*.php' -print0 | xargs -0 -n1 php -l
+          node --check host/public/legacy-import.js
+      - name: Run all server CRM v2 and host contract tests
+        run: >-
+          python lab/scripts/run_panel_tests.py
+          test_host_schema
+          test_host_api
+          test_server_crm_v2_schema
+          test_server_crm_v2_device_auth
+          test_server_crm_v2_finance
+          test_server_crm_v2_finance_void
+          test_server_crm_v2_finance_transport
+          test_server_crm_v2_legacy_import
+          test_server_crm_v2_legacy_apply
+          test_server_crm_v2_legacy_page
+          test_server_crm_v2_database_resilience
+          test_server_crm_v2_backup_restore
+      - name: Detect obvious committed secrets/private-key material in changed text
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --unified=0 origin/main...HEAD | grep -E '^\+.*(BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}|sk-[A-Za-z0-9]{20,})'; then
+            echo 'Potential secret material detected in added lines' >&2
+            exit 1
+          fi
