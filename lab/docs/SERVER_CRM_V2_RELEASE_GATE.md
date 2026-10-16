@@ -9,13 +9,13 @@ separate operator action and is never inferred from a green source checkout.
 
 | Phase | Required outcome | Permanent evidence |
 | --- | --- | --- |
-| 0 — baseline | reproducible offline/real-DB verification | `server-crm-v2.yml`, PHP lint, Windows client suites |
-| 1 — host foundation | forward-only schema, HTTPS/API auth, deterministic validation | `test_server_crm_v2_schema`, `test_host_api`, migration 001–004 checks |
-| 2 — multi-device auth | independent devices/sessions, scoped revocation, protected credentials | `test_server_crm_v2_device_auth`, `test_server_crm_v2_client_devices`, `test_server_crm_v2_authority` |
-| 3 — server-authoritative CRM | bootstrap/cursor/outbox/restart safety, epoch quarantine | `test_cloud_transport`, `test_cloud_apply`, `test_cloud_integration`, `test_cloud_state` |
-| 4 — concurrency/accounting | optimistic conflicts, append-safe finance, delete/offline races, advisory presence | `test_cloud_conflicts`, `test_server_crm_v2_finance*`, `test_server_crm_v2_database_resilience`, `test_server_crm_v2_presence*` |
-| 5 — legacy migration | guarded review/apply/reconciliation and replay safety | `test_server_crm_v2_legacy_import`, `test_server_crm_v2_legacy_apply`, `test_server_crm_v2_legacy_page`, `test_v115_audit_config_switch` |
-| 6+ — UX/stress/recovery | operator status, bounded retry/failure behavior, multi-client races, backup/restore | `test_cloud_ui`, `test_cloud_transport`, `test_cloud_integration`, `test_server_crm_v2_database_resilience`, `test_server_crm_v2_backup_restore` |
+| Phase 0 — baseline | reproducible offline/real-DB verification | `server-crm-v2.yml`, PHP lint, Windows client suites |
+| Phase 1 — host foundation | forward-only schema, HTTPS/API auth, deterministic validation | `test_server_crm_v2_schema`, `test_host_api`, migration 001–004 checks |
+| Phase 2 — multi-device auth | independent devices/sessions, scoped revocation, protected credentials | `test_server_crm_v2_device_auth`, `test_server_crm_v2_client_devices`, `test_server_crm_v2_authority` |
+| Phase 3 — server-authoritative CRM | bootstrap/cursor/outbox/restart safety, epoch quarantine | `test_cloud_transport`, `test_cloud_apply`, `test_cloud_integration`, `test_cloud_state` |
+| Phase 4 — concurrency/accounting | optimistic conflicts, append-safe finance, delete/offline races, advisory presence | `test_cloud_conflicts`, `test_server_crm_v2_finance*`, `test_server_crm_v2_database_resilience`, `test_server_crm_v2_presence*` |
+| Phase 5 — legacy migration | guarded review/apply/reconciliation and replay safety | `test_server_crm_v2_legacy_import`, `test_server_crm_v2_legacy_apply`, `test_server_crm_v2_legacy_page`, `test_v115_audit_config_switch` |
+| Phase 6+ — UX/stress/recovery | operator status, bounded retry/failure behavior, multi-client races, backup/restore | `test_cloud_ui`, `test_cloud_transport`, `test_cloud_integration`, `test_server_crm_v2_database_resilience`, `test_server_crm_v2_backup_restore` |
 
 The compatibility matrix is part of the gate: host transactional paths run on
 both MariaDB 11.4 and MySQL 5.7, while the production desktop family runs on
