@@ -1,0 +1,77 @@
+name: v115-presence-verify
+
+on:
+  push:
+    branches:
+      - work/v115-finalize-phases
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mariadb-presence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: irica_presence_root
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      IRICA_DB_ROOT_PASSWORD: irica_presence_root
+      IRICA_DB_HOST: 127.0.0.1
+      IRICA_DB_PORT: '3307'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install runtime clients
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mariadb-client php-cli php-mysql php-mbstring
+          echo "IRICA_MARIADB=$(command -v mariadb)" >> "$GITHUB_ENV"
+          echo "IRICA_PHP=$(command -v php)" >> "$GITHUB_ENV"
+      - name: Verify advisory presence on MariaDB 11.4
+        run: python lab/scripts/run_panel_tests.py test_server_crm_v2_presence
+
+  mysql57-presence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:5.7
+        env:
+          MYSQL_ROOT_PASSWORD: irica_presence_root
+        ports:
+          - 3308:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pirica_presence_root --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+    env:
+      IRICA_DB_ROOT_PASSWORD: irica_presence_root
+      IRICA_DB_HOST: 127.0.0.1
+      IRICA_DB_PORT: '3308'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install runtime clients
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mariadb-client php-cli php-mysql php-mbstring
+          echo "IRICA_MARIADB=$(command -v mariadb)" >> "$GITHUB_ENV"
+          echo "IRICA_PHP=$(command -v php)" >> "$GITHUB_ENV"
+      - name: Verify advisory presence on MySQL 5.7
+        run: python lab/scripts/run_panel_tests.py test_server_crm_v2_presence
