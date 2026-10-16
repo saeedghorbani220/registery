@@ -32,6 +32,11 @@ jobs:
               raise SystemExit('replace_once helper anchor changed')
           s=s.replace(old,new,1)
           s=s.replace('def import_document(self, document):','def import_document(self, body):')
+          old_note='- Optimistic row-version conflict handling prevents silent overwrites.'
+          new_note='- **Conflict-safe shared CRM:** server row versions remain the concurrency\\n  authority. Conflicts are surfaced for review instead of silently overwriting\\n  another operator\'s edit.'
+          if old_note not in s:
+              raise SystemExit('release-note helper anchor changed')
+          s=s.replace(old_note,new_note)
           p.write_text(s,encoding='utf-8')
       - name: Apply Phase 4 presence implementation
         run: python lab/scripts/patch_v115_phase4_presence.py
