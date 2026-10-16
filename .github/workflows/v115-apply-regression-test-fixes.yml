@@ -13,7 +13,7 @@ permissions:
 jobs:
   patch-verify-commit:
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
@@ -22,8 +22,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install focused test dependency
-        run: python -m pip install --disable-pip-version-check requests
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
       - name: Refresh historical assertions
         run: python lab/scripts/patch_v115_regression_tests.py
       - name: Verify corrected contracts
@@ -31,12 +31,14 @@ jobs:
           python lab/scripts/run_panel_tests.py
           test_cloud_mapper
           test_v1_1_5_tabs_closed
+          test_robot_interpreter
+          test_estelam_hamta
       - name: Commit test-only contract refresh
         shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add lab/tests/test_cloud_mapper.py lab/tests/test_v1_1_5_tabs_closed.py
+          git add lab/tests/test_cloud_mapper.py lab/tests/test_v1_1_5_tabs_closed.py lab/tests/test_robot_interpreter.py lab/tests/test_estelam_hamta.py
           git diff --cached --check
-          git commit -m "test: align historical contracts with v1.15 behavior"
+          git commit -m "test: make historical regression clean-checkout safe"
           git push origin HEAD:audit/server-crm-v1.15.0
