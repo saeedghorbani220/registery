@@ -27,7 +27,7 @@ jobs:
           p=Path('lab/scripts/patch_v115_phase4_presence.py')
           s=p.read_text(encoding='utf-8')
           old='''def replace_once(path, old, new):\n    text = read(path)\n    count = text.count(old)\n    if count != 1:\n        raise SystemExit(f"{path}: expected one anchor, found {count}: {old[:100]!r}")\n    write(path, text.replace(old, new, 1))\n'''
-          new='''def replace_once(path, old, new):\n    text = read(path)\n    count = text.count(old)\n    if count == 2 and path == ".github/workflows/server-crm-v2.yml" and old.startswith("          test_server_crm_v2_database_resilience"):\n        at = text.rfind(old)\n        write(path, text[:at] + new + text[at + len(old):])\n        return\n    if count != 1:\n        raise SystemExit(f"{path}: expected one anchor, found {count}: {old[:100]!r}")\n    write(path, text.replace(old, new, 1))\n'''
+          new='''def replace_once(path, old, new):\n    text = read(path)\n    count = text.count(old)\n    if count == 2 and path == ".github/workflows/server-crm-v2.yml":\n        if old.startswith("          test_server_crm_v2_finance_transport"):\n            write(path, text.replace(old, new, 1))\n            return\n        if old.startswith("          test_server_crm_v2_database_resilience"):\n            at = text.rfind(old)\n            write(path, text[:at] + new + text[at + len(old):])\n            return\n    if count != 1:\n        raise SystemExit(f"{path}: expected one anchor, found {count}: {old[:100]!r}")\n    write(path, text.replace(old, new, 1))\n'''
           if old not in s:
               raise SystemExit('replace_once helper anchor changed')
           s=s.replace(old,new,1)
