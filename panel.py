@@ -14138,11 +14138,13 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path in ("/cloud-sync", "/cloud-sync-now"):  # self.path == "/cloud-sync"
             self._json(*_cloud_route_guard(cloud_sync_now))
         elif self.path == "/cloud-presence":
-            self._json(*_cloud_route_guard(cloud_presence_heartbeat,
-                                           self._read_json()))
+            resp, status = _cloud_route_guard(cloud_presence_heartbeat,
+                                                self._read_json())
+            self._json(resp, status)
         elif self.path == "/cloud-presence-close":
-            self._json(*_cloud_route_guard(cloud_presence_close,
-                                           self._read_json()))
+            resp, status = _cloud_route_guard(cloud_presence_close,
+                                                self._read_json())
+            self._json(resp, status)
         elif self.path == "/cloud-resolve-conflict":
             resp, status = _cloud_route_guard(cloud_resolve_conflict,
                                               self._read_json())
