@@ -20,6 +20,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Install cloud UI verifier dependency
+        run: python -m pip install --disable-pip-version-check requests
       - name: Align presence routes with existing guarded response pattern
         shell: python
         run: |
