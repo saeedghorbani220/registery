@@ -1,0 +1,42 @@
+name: v115-apply-regression-test-fixes
+
+on:
+  push:
+    branches:
+      - 'audit/server-crm-v1.15.0'
+    paths:
+      - '.github/workflows/v115-apply-regression-test-fixes.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-verify-commit:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/server-crm-v1.15.0
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install focused test dependency
+        run: python -m pip install --disable-pip-version-check requests
+      - name: Refresh historical assertions
+        run: python lab/scripts/patch_v115_regression_tests.py
+      - name: Verify corrected contracts
+        run: >-
+          python lab/scripts/run_panel_tests.py
+          test_cloud_mapper
+          test_v1_1_5_tabs_closed
+      - name: Commit test-only contract refresh
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lab/tests/test_cloud_mapper.py lab/tests/test_v1_1_5_tabs_closed.py
+          git diff --cached --check
+          git commit -m "test: align historical contracts with v1.15 behavior"
+          git push origin HEAD:audit/server-crm-v1.15.0
