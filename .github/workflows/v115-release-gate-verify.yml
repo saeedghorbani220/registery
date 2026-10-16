@@ -1,0 +1,27 @@
+name: v115-release-gate-verify
+
+on:
+  push:
+    branches:
+      - work/v115-finalize-phases
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-gate:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify release gate and Phase 4 client wiring
+        run: >-
+          python lab/scripts/run_panel_tests.py
+          test_server_crm_v2_release_gate
+          test_server_crm_v2_presence_client
