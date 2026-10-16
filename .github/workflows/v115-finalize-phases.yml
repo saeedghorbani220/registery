@@ -1,0 +1,54 @@
+name: v115-finalize-phases
+
+on:
+  push:
+    branches:
+      - work/v115-finalize-phases
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-phase4-presence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Prepare one intentional last-match CI patch
+        shell: python
+        run: |
+          from pathlib import Path
+          p=Path('lab/scripts/patch_v115_phase4_presence.py')
+          s=p.read_text(encoding='utf-8')
+          old='''def replace_once(path, old, new):\n    text = read(path)\n    count = text.count(old)\n    if count != 1:\n        raise SystemExit(f"{path}: expected one anchor, found {count}: {old[:100]!r}")\n    write(path, text.replace(old, new, 1))\n'''
+          new='''def replace_once(path, old, new):\n    text = read(path)\n    count = text.count(old)\n    if count == 2 and path == ".github/workflows/server-crm-v2.yml" and old.startswith("          test_server_crm_v2_database_resilience"):\n        at = text.rfind(old)\n        write(path, text[:at] + new + text[at + len(old):])\n        return\n    if count != 1:\n        raise SystemExit(f"{path}: expected one anchor, found {count}: {old[:100]!r}")\n    write(path, text.replace(old, new, 1))\n'''
+          if old not in s:
+              raise SystemExit('replace_once helper anchor changed')
+          p.write_text(s.replace(old,new,1),encoding='utf-8')
+      - name: Apply Phase 4 presence implementation
+        run: python lab/scripts/patch_v115_phase4_presence.py
+      - name: Syntax and clean-checkout contract checks
+        run: |
+          python -m py_compile cloud_sync/client.py panel.py lab/tests/test_server_crm_v2_presence.py lab/tests/test_server_crm_v2_presence_client.py
+          php -l host/src/Presence.php
+          php -l host/public/index.php
+          python lab/scripts/run_panel_tests.py test_server_crm_v2_presence_client
+      - name: Commit generated implementation
+        run: |
+          git config user.name "saeedghorbani220"
+          git config user.email "saeedghorbani220@gmail.com"
+          git add .github/workflows/server-crm-v2.yml RELEASE_NOTES_v1.15.0.md \
+            host/src/Presence.php host/public/index.php cloud_sync/client.py panel.py \
+            lab/tests/test_server_crm_v2_presence.py lab/tests/test_server_crm_v2_presence_client.py
+          if git diff --cached --quiet; then
+            echo "No generated changes"
+          else
+            git commit -m "feat: complete phase 4 advisory record presence"
+            git push origin HEAD:work/v115-finalize-phases
+          fi
