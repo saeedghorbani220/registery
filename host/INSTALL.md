@@ -69,7 +69,7 @@ Upload the whole `host/` folder **outside** `public_html`, e.g.
 /home/youruser/irica-host/
 ├── bin/           migrate.php, create-admin.php, create-user.php, smoke-test.php
 ├── config/        config.php goes here (you create it in step 3)
-├── migrations/    001_initial.sql
+├── migrations/    001_initial.sql through 004_legacy_import_verification.sql
 ├── public/        ← the ONLY web-reachable directory
 ├── src/           PHP sources
 └── INSTALL.md  SECURITY.md
@@ -110,9 +110,11 @@ php -r 'echo bin2hex(random_bytes(32)), PHP_EOL;'   # paste into jwt_secret
 chmod 600 config/config.php
 ```
 
-Fill in every `REPLACE_…` value: `db.host`, `db.port`, `db.dbname`,
-`db.user`, `db.password`, and `db_migrate` (the privileged account from
-step 1, or `null` if you knowingly gave the app account DDL — don't).
+Fill in every `REPLACE_…` value under `db`. If the application account
+is correctly DML-only, set `db_migrate` to a **complete second database
+connection array** (`host`, `port`, `dbname`, `user`, `password`) for the
+privileged account from step 1. Use `null` only when the `db` account
+itself intentionally holds DDL privileges — not recommended.
 Config refuses to load while a placeholder is still present, and it refuses
 an all-zero `jwt_secret`.
 
@@ -140,7 +142,7 @@ If your cPanel plan does not provide SSH or Terminal access, you have two safe o
    https://api.<domain>/setup.php?key=YOUR_RANDOM_LONG_SECRET_KEY
    ```
 3. Use the web interface to:
-   - Run database migrations (creates all 18 tables).
+   - Run all pending forward-only database migrations.
    - Create the initial admin user.
    - Run the smoke test to verify extensions and database connectivity.
    - Click **"حذف خودکار فایل setup.php"** to permanently delete the setup script from the server once finished.
@@ -169,8 +171,8 @@ Run migrations from the shell, **never** from a URL:
 ```sh
 cd /home/youruser/irica-host
 php bin/migrate.php --status     # what is recorded so far
-php bin/migrate.php              # applies 001_initial.sql
-php bin/migrate.php --status     # one row, checksum matches the file
+php bin/migrate.php              # applies every pending migration (001, 002, 003, ...)
+php bin/migrate.php --status     # every applied migration has a matching checksum
 ```
 
 Behaviour you can rely on:
@@ -207,18 +209,23 @@ IRICA_ADMIN_PASSWORD='…' php bin/create-admin.php --username=admin
 php bin/create-admin.php --help
 ```
 
-This is the account the desktop client logs in with; it is what mints the
-first enrolled device (spec §7: enrolment is admin-only).
+This account can sign in from the desktop client and self-enrol its own
+machine. Normal users can also self-enrol their own machines; administrators
+can revoke any machine in the tenant. Device credentials are independent
+refresh-token families, so signing out or revoking one machine does not
+implicitly terminate unrelated machines.
 
 ---
 
-## 6. Create one account per colleague
+## 6. Create user accounts and enrol desktop machines
 
 `create-admin.php` is single-use by design, so it is not how a second person
-gets in. **Every colleague gets their own username** — one account per person,
-never a shared login — created by `bin/create-user.php`, the CLI that spec §15
-makes the only way to add an account (there is deliberately no HTTP endpoint
-for it):
+gets in. Create additional accounts with `bin/create-user.php`; there is
+deliberately no public HTTP endpoint for user creation. **One username per
+human is strongly recommended** because audit events can then identify who
+made a change. The server nevertheless supports multiple simultaneous sessions
+and multiple desktop machines for the same username when a shared account is
+operationally necessary:
 
 ```sh
 cd /home/youruser/irica-host
@@ -228,10 +235,17 @@ php bin/create-user.php --username=sara --display-name='Sara' --role=user
 php bin/create-user.php --help
 ```
 
-* `--role=user` is the **non-administrator**: it reads everything and creates
-  and edits cases, but it may not write `settings`, open or close a period,
-  delete a record, enrol a device or run an import (spec §7). Use
-  `--role=admin` only for somebody who really administers the installation.
+* `--role=user` is the **non-administrator**: it reads common CRM data and
+  creates and edits cases, but it may not write administrator settings, open
+  or close a period, delete protected records, or run a legacy import. It can
+  self-enrol and revoke its own desktop machines. Use `--role=admin` only for
+  somebody who really administers the installation.
+* A user can sign in on more than one PC at the same time. Each PC receives a
+  distinct `sync_device_id` and device refresh-token family, so one machine can
+  be revoked without disabling the others.
+* A shared username is supported, including simultaneous use from two PCs, but
+  it weakens human attribution in the audit trail. Prefer separate usernames
+  whenever you need to know which person performed an action.
 * With no `--password=` and no `IRICA_USER_PASSWORD`, a random password is
   generated and printed **once** — record it in the password manager
   immediately, before it scrolls away; it exists nowhere else and no hash is
@@ -288,29 +302,121 @@ version, no configuration and no dependency detail (spec §6).
    PHP ini. `smoke-test.php` and `public/index.php` both set
    `display_errors = 0` in code as well, so a missing directive degrades
    safely rather than exposing a stack trace.
-3. Remove shell access you do not need. The four `bin/` scripts are the
-   only CLI surface; they print no credential.
+3. Remove shell access you do not need. The five `bin/` scripts are the
+   supported CLI surface: migrate, create-admin, create-user, smoke-test
+   and backup-to-telegram. They do not print credentials except the
+   documented one-time generated account password during account setup.
 
 ---
 
 ## 9. Connect the desktop client
 
-Set the panel's sync endpoint to `https://api.<domain>/v1` and log in with
-the administrator from step 5. The first push from an empty host is the
-one-shot import (spec §8): it is accepted exactly once per tenant, replays
-byte-for-byte on retry, and every later import is answered
-`409 DATASET_NOT_EMPTY`. After it lands, `tenant_state.bootstrap_status`
-is `done` and `source_installation_id` records which installation the data
-came from.
+Set the panel's sync endpoint to `https://api.<domain>/v1` and log in with a
+user account. On a new PC the client self-enrols a machine owned by that user;
+the resulting device credential is separate from the user's browser/login
+session. The same username may be active on multiple enrolled PCs at once.
+
+For a genuinely empty server, the existing bootstrap path remains a one-shot
+initial import (spec §8): it is accepted exactly once per tenant, replays
+byte-for-byte on retry, and every later bootstrap import is answered
+`409 DATASET_NOT_EMPTY`. After it lands, `tenant_state.bootstrap_status` is
+`done` and `source_installation_id` records which installation supplied the
+initial dataset.
+
+Do **not** weaken or bypass that one-shot guard to merge old customer files
+into a populated server. Use the reviewed Legacy Migration Center below.
+
+---
+
+## 9.5. Migrate a legacy local CRM database (v1.13.1 or older)
+
+The browser migration center is for old local `crm_store.json` databases from
+version **1.13.1 or older**, including stores that predate a formal version
+marker. It is separate from `/bootstrap/import` and is safe to use when the
+online tenant already contains CRM rows.
+
+### Before opening the migration window
+
+1. Apply every host migration and verify the install:
+   ```sh
+   php bin/migrate.php
+   php bin/migrate.php --status
+   php bin/smoke-test.php
+   ```
+2. Take a fresh server database backup and keep the original legacy JSON file
+   unchanged. The legacy file contains customer PII; do not paste it into logs,
+   tickets, chat rooms, or source control.
+3. In `config/config.php`, temporarily enable the migration surface:
+   ```php
+   'legacy_import_enabled' => true,
+   ```
+   It is `false` in `config.example.php` by design. Both the page and every
+   `/v1/legacy-import/*` API endpoint enforce this switch server-side.
+4. Open `https://api.<domain>/legacy-import.php` over HTTPS and sign in with an
+   **administrator** account. The page keeps the user access token in browser
+   memory only; it does not use cookies, localStorage, or sessionStorage.
+
+### Analyze and review
+
+1. Select the old `crm_store.json`. The browser checks JSON syntax and the
+   configured import size limit, then sends it to `POST /v1/legacy-import/analyze`.
+2. Analyze is a dry run with respect to live CRM tables. The server normalizes
+   the old schema, stores staged normalized records, records the source
+   SHA-256, and classifies rows as create, skip, conflict, invalid, or pending.
+   The raw uploaded JSON text is **not** stored in the database.
+3. Check the summary counts and expand staged rows when you need to inspect the
+   normalized source values. Exact or safe matches may already be classified as
+   skip; uncertain matches are never silently merged.
+4. Resolve every conflict or invalid row explicitly. Available review decisions
+   are create, merge, skip, and reject where valid. Merge/skip requires a live
+   target UUID. If the server found multiple candidates and therefore supplies
+   no target, **do not guess a UUID**: independently verify the intended live
+   record, or choose create/reject.
+5. Financial transaction rows are append-safe. The legacy transaction sequence
+   is not authoritative on a live server; apply locks the customer ledger and
+   allocates the next server sequence instead of overwriting an existing entry.
+
+### Apply, reconcile, and close the window
+
+1. Apply is enabled only when the job has zero unresolved staged rows. The
+   final write runs in one database transaction: accepted rows commit together
+   or the database rolls the whole apply back on an invariant failure.
+2. A completed job is replay-safe. Re-applying the same job, or analyzing the
+   exact same source file again for the same tenant, does not duplicate the
+   migration.
+3. Before declaring success, reconcile the old source and online dataset:
+   customer, owner, device/case, period and transaction counts; customer
+   balances; case stages; customer-device and owner-device links; and done,
+   closed and problem totals. Financial sums must match exactly after accounting
+   for transactions that were deliberately rejected during review.
+4. Immediately close the migration window in `config/config.php`:
+   ```php
+   'legacy_import_enabled' => false,
+   ```
+   Reload `https://api.<domain>/legacy-import.php`; it must now return `404`.
+   The API routes are disabled by the same switch on their next request.
+
+If a browser request is interrupted, reload the page, sign in again, and resume
+with the migration job UUID shown in the review. Do not edit staging tables or
+live CRM tables manually to "finish" an interrupted job.
 
 ---
 
 ## 10. Backups, restore and rotation
 
 * **Back up the database nightly**, encrypted at rest, and *test a restore*.
-  The schema is forward-only: the restore path is "load the dump, then run
-  `php bin/migrate.php --status` and apply anything newer" — there is no
-  rollback script by design (spec §10.10).
+  `backup-to-telegram.php` discovers every live base table from
+  `information_schema` and includes database triggers, so operational
+  tables introduced by migrations 002/004 and the device-ownership
+  trigger from migration 003 are part of the dump. When `db_migrate` is
+  configured, backup uses that privileged connection for controlled
+  metadata reads while the runtime app account remains DML-only.
+* **Restore into a separate database before trusting a backup.** Load the
+  `.sql` dump, compare the source/restored base-table and trigger counts,
+  verify representative CRM/financial rows, then run
+  `php bin/migrate.php --status` against the restored database and apply
+  only genuinely newer migrations. The schema is forward-only; there is
+  no destructive down migration (spec §10.10).
 * Include `config/config.php` in the encrypted backup. Losing it is
   recoverable (you have the DB dump and the procedures below); leaking it is not.
 * **Rotation:**
@@ -358,7 +464,9 @@ rollback is just putting the old folder and the old dump in place.
 | `404 NOT_FOUND` on a path that looks right | `base_path` mismatch, or the document root is not `public/` | match the config to the URL: `base_path` `/v1` → `/v1/...` |
 | `415 UNSUPPORTED_MEDIA_TYPE` | the client did not send `application/json` | proxy or client stripping `Content-Type` |
 | `429 RATE_LIMITED` with `Retry-After` | deliberate, temporary (spec §10.5) | wait for the header; it always releases |
-| `401 AUTH_REQUIRED` on `/sync/*` | no device token, or a device token where a user token is required | the client must enroll first (`POST /sync-devices/enroll`) |
+| `401 AUTH_REQUIRED` on `/sync/*` | no live device credential, or the wrong token kind was sent | sign in again and let the client self-enrol its machine (`POST /sync-devices/self-enroll`) |
+| `403 PERMISSION_DENIED` on `/legacy-import/*` | the temporary legacy migration surface is disabled | enable `legacy_import_enabled` only for a reviewed migration window, then turn it off again |
+| `404` on `/legacy-import.php` | migration mode is disabled, or the page is not present in the deployed package | this is expected after migration; enable the switch only when intentionally migrating |
 | `409 DATASET_NOT_EMPTY` on import | the tenant already holds rows (spec §8) | this is correct after the first import; do not empty the tables to retry |
 | `smoke-test` says the account can `CREATE` | the cPanel grant screen gave it all privileges | revoke DDL in MySQL, then re-run |
 | `migrate.php` exits 2 on checksum | the migration file changed after it was applied | never edit an applied migration; add a new one |

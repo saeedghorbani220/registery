@@ -60,6 +60,60 @@ final class Config
         self::$path = '';
     }
 
+    /**
+     * Read one literal boolean directly from the active config source without
+     * executing the file or consulting the process cache. Security kill
+     * switches use this so edits take effect on the very next request even
+     * when PHP OPcache is configured not to revalidate scripts.
+     */
+    public static function freshBoolean(string $key, bool $default = false): bool
+    {
+        $file = self::$path !== '' ? self::$path : self::locate();
+        $source = @file_get_contents($file);
+        if (!is_string($source) || $source === '') {
+            return $default;
+        }
+
+        // Parse PHP tokens rather than raw text. A commented-out "true" must
+        // never enable a security kill switch, and duplicate assignments are
+        // ambiguous, so they fail closed to the caller-supplied default.
+        $tokens = token_get_all($source);
+        $values = [];
+        $count = count($tokens);
+        $singleQuoted = "'" . $key . "'";
+        $doubleQuoted = '"' . $key . '"';
+        for ($i = 0; $i < $count; $i++) {
+            $token = $tokens[$i];
+            if (!is_array($token) || $token[0] !== T_CONSTANT_ENCAPSED_STRING
+                || ($token[1] !== $singleQuoted && $token[1] !== $doubleQuoted)) {
+                continue;
+            }
+
+            $j = $i + 1;
+            while ($j < $count && is_array($tokens[$j])
+                && in_array($tokens[$j][0], [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)) {
+                $j++;
+            }
+            if ($j >= $count || !is_array($tokens[$j])
+                || $tokens[$j][0] !== T_DOUBLE_ARROW) {
+                continue;
+            }
+            $j++;
+            while ($j < $count && is_array($tokens[$j])
+                && in_array($tokens[$j][0], [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)) {
+                $j++;
+            }
+            if ($j >= $count || !is_array($tokens[$j]) || $tokens[$j][0] !== T_STRING) {
+                continue;
+            }
+            $literal = strtolower((string) $tokens[$j][1]);
+            if ($literal === 'true' || $literal === 'false') {
+                $values[] = $literal === 'true';
+            }
+        }
+        return count($values) === 1 ? $values[0] : $default;
+    }
+
     public static function path(): string
     {
         return self::$path;

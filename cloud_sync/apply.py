@@ -35,10 +35,13 @@ Rules this module keeps
 * **Idempotent**: the same page applied twice leaves the same bytes, and an
   apply that changes nothing does not write at all (no ``.bak`` churn, no
   mtime churn for the robots' benefit).
-* **Fail closed**: an unknown entity, a malformed envelope, duplicate ids in
-  one batch, a record that does not decode or a reference this machine cannot
-  resolve raises *before* a single byte is written — half a store is worse
-  than none. :class:`mapper.UnresolvedReferenceError` is never caught, so
+* **Fail closed**: an unknown entity, a malformed envelope, a record that
+  does not decode or a reference this machine cannot resolve raises *before*
+  a single byte is written — half a store is worse than none. Repeated row ids
+  in an incremental page are collapsed to their latest occurrence while
+  retaining the first occurrence's position, because one row may legitimately
+  have several ordered log entries after the cursor.
+  :class:`mapper.UnresolvedReferenceError` is never caught, so
   ``client.pull_all`` can turn it into the stable ``UNRESOLVED_REFERENCE``
   code and leave the cursor where it was.
 * **The cursor belongs to the client**: nothing here reads or writes it.
@@ -721,7 +724,7 @@ def _page_changes(page, route):
     if not isinstance(changes, list):
         raise _bad(route)
     out = []
-    seen = set()
+    seen = {}
     for change in changes:
         if not isinstance(change, dict):
             raise _bad(route)
@@ -745,9 +748,18 @@ def _page_changes(page, route):
         if record is not None and not isinstance(record, dict):
             raise _bad(route)
         key = (entity, cloud_id)
-        if key in seen:
-            raise _bad(route)                  # duplicate id in one batch
-        seen.add(key)
+        out_index = seen.get(key)
+        if out_index is not None:
+            # One row may legitimately have several change_log entries after
+            # the caller's cursor. The real host returns the current live
+            # snapshot for each entry while the executable fake preserves the
+            # historical snapshots. In either representation the final entry
+            # is the state the client must apply. Keep the first occurrence's
+            # position so parent-before-child dependency order is preserved,
+            # but replace its payload/version with the latest occurrence.
+            out[out_index] = (entity, cloud_id, row_version, record)
+            continue
+        seen[key] = len(out)
         out.append((entity, cloud_id, row_version, record))
     return out
 

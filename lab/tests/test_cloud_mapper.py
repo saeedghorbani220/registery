@@ -1009,16 +1009,25 @@ class RealStoreRecordTests(FixtureTestCase):
                     mapper.to_row("customer_transactions", record,
                                   source_installation_id=self.INSTALL), row)
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", mapper.SettingsAllowlistWarning)
+        # v1.15 adds database_mode as an explicitly device-local setting.
+        # split_store must keep it off the wire and surface the allowlist warning
+        # rather than treating that intentional local key as a mapper failure.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", mapper.SettingsAllowlistWarning)
             rows = mapper.split_store(data,
                                       source_installation_id=self.INSTALL)
+        self.assertTrue(any("database_mode" in str(item.message)
+                            for item in caught))
         merged = mapper.merge_store(rows,
                                     source_installation_id=self.INSTALL)
         for key in ("customers", "owners", "identities", "devices", "periods"):
             self.assertEqual(merged[key], data[key], key)
-        syncable, _local = mapper.split_settings(data["settings"])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", mapper.SettingsAllowlistWarning)
+            syncable, local = mapper.split_settings(data["settings"])
         self.assertEqual(merged["settings"], syncable)
+        self.assertEqual(local.get("database_mode"),
+                         data["settings"].get("database_mode"))
 
     def test_real_references_are_uuids_and_resolve_back(self):
         data = self._build_store()
