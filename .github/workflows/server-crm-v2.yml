@@ -43,6 +43,7 @@ jobs:
           test_server_crm_v2_authority
           test_server_crm_v2_finance_outbox
           test_server_crm_v2_finance_transport
+          test_server_crm_v2_presence_client
 
   windows-regression-contracts:
     runs-on: windows-latest
@@ -63,6 +64,7 @@ jobs:
           test_v1_1_5_tabs_closed
           test_estelam_hamta
           test_robot_interpreter
+          test_server_crm_v2_release_gate
 
   host-foundation:
     runs-on: ubuntu-latest
@@ -107,6 +109,7 @@ jobs:
           test_server_crm_v2_legacy_page
           test_server_crm_v2_database_resilience
           test_server_crm_v2_backup_restore
+          test_server_crm_v2_presence
           test_v115_audit_config_switch
       - name: Lint host PHP and migration page JavaScript
         run: |
@@ -154,3 +157,4 @@ jobs:
           test_server_crm_v2_legacy_apply
           test_server_crm_v2_database_resilience
           test_server_crm_v2_backup_restore
+          test_server_crm_v2_presence
