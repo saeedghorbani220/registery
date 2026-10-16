@@ -32,7 +32,7 @@ define('HOST_ROOT', dirname(__DIR__));
 
 foreach ([
     'Schema', 'Database', 'Http', 'Ids', 'Config', 'Log', 'Tokens', 'Roles',
-    'RateLimit', 'Auth', 'Devices', 'Sync', 'Import', 'Finance',
+    'RateLimit', 'Auth', 'Devices', 'Sync', 'Import', 'Finance', 'Presence',
     'LegacyImport', 'LegacyVerify', 'LegacyApply',
 ] as $classFile) {
     require_once HOST_ROOT . '/src/' . $classFile . '.php';
@@ -100,6 +100,8 @@ try {
         '/sync/bootstrap' => ['GET'],
         '/sync/changes' => ['GET'],
         '/sync/mutations' => ['POST'],
+        '/presence/heartbeat' => ['POST'],
+        '/presence/close' => ['POST'],
         '/finance/transactions/append' => ['POST'],
         '/finance/transactions/void' => ['POST'],
         '/legacy-import/analyze' => ['POST'],
@@ -132,6 +134,7 @@ try {
     $sync = new Sync($db, $log, $config);
     $import = new Import($db, $sync, $log, $config);
     $finance = new Finance($db, $log, $config);
+    $presence = new Presence($db, $log);
     $legacyImport = new LegacyImport($db, $sync, $log, $config);
     $legacyVerify = new LegacyVerify($db, $log, $config);
     $legacyApply = new LegacyApply($db, $sync, $log, $config);
@@ -279,6 +282,34 @@ try {
             }
             /** @var list<array<string, mixed>> $operations */
             $payload = $sync->mutations($operations, $context, $requestId);
+            $statusCode = 200;
+            $errorCode = '';
+            Response::ok($payload);
+            break;
+
+        case '/presence/heartbeat':
+            $device = requireDevice($auth, $request);
+            $body = $request->jsonBody();
+            $acting = $auth->actingUser($request);
+            if ($acting === null) {
+                throw new ApiException(401, Codes::AUTH_REQUIRED,
+                    'an acting user token is required for presence');
+            }
+            $payload = $presence->heartbeat($device, $acting, $body, $requestId);
+            $statusCode = 200;
+            $errorCode = '';
+            Response::ok($payload);
+            break;
+
+        case '/presence/close':
+            $device = requireDevice($auth, $request);
+            $body = $request->jsonBody();
+            $acting = $auth->actingUser($request);
+            if ($acting === null) {
+                throw new ApiException(401, Codes::AUTH_REQUIRED,
+                    'an acting user token is required for presence');
+            }
+            $payload = $presence->close($device, $acting, $body, $requestId);
             $statusCode = 200;
             $errorCode = '';
             Response::ok($payload);

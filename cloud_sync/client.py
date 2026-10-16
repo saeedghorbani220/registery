@@ -628,6 +628,31 @@ class SyncClient(object):
                 break
         return pages
 
+    def presence_heartbeat(self, entity, entity_id, lease_id=None):
+        """Refresh advisory presence for one server record.
+
+        Presence never authorizes or blocks a write; row_version remains the
+        concurrency boundary. The acting user header is mandatory so peers can
+        be attributed without persisting the user access token.
+        """
+        entity = str(entity or "").strip()
+        entity_id = str(entity_id or "").strip()
+        if not entity or not entity_id:
+            raise ValueError("presence requires entity and entity_id")
+        body = {"entity": entity, "entity_id": entity_id}
+        if lease_id:
+            body["lease_id"] = str(lease_id)
+        return self._request("POST", "/presence/heartbeat", body=body,
+                             acting=True)
+
+    def presence_close(self, lease_id):
+        """Best-effort early release of this device's advisory lease."""
+        lease_id = str(lease_id or "").strip()
+        if not lease_id:
+            raise ValueError("presence close requires lease_id")
+        return self._request("POST", "/presence/close",
+                             body={"lease_id": lease_id}, acting=True)
+
     def import_document(self, body):
         """``POST /bootstrap/import`` — the one-shot seed of spec §8.
 

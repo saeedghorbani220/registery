@@ -18,6 +18,7 @@ robot-compatible cache and durable outbox.
 - **Conflict-safe shared CRM:** server row versions remain the concurrency
   authority. Conflicts are surfaced for review instead of silently overwriting
   another operator's edit.
+- Advisory record presence shows when another enrolled PC has the same case open; it never locks editing and expires automatically.
 - **Financial integrity:** imported customer transactions remain append-safe and
   now preserve their legacy per-customer ordering before server sequence
   allocation. Rich MariaDB reconciliation checks counts, links, case stages and

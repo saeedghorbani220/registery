@@ -1976,6 +1976,41 @@ def cloud_worker_kick():
         _CLOUD_WORKER_CV.notify_all()
 
 
+def _cloud_presence_target(entity, local_id, runtime):
+    """Map one local CRM id to the server UUID used by record_presence."""
+    from cloud_sync import mapper
+    entity = str(entity or "").strip()
+    local_id = str(local_id or "").strip()
+    canon = "crm_devices" if entity in ("device", "devices", "crm_devices") else entity
+    allowed = {"crm_devices", "customers", "owners", "identities", "periods"}
+    if canon not in allowed or not local_id:
+        raise ValueError("invalid presence target")
+    install = getattr(runtime.get("config"), "source_installation_id", None)
+    if not install:
+        raise ValueError("presence requires source installation id")
+    return canon, mapper.legacy_to_uuid(install, canon, local_id)
+
+
+def cloud_presence_heartbeat(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("presence body must be an object")
+    runtime = _cloud_runtime()
+    entity, entity_id = _cloud_presence_target(
+        payload.get("entity"), payload.get("entity_id"), runtime)
+    lease_id = str(payload.get("lease_id") or "").strip() or None
+    return runtime["client"].presence_heartbeat(entity, entity_id, lease_id), 200
+
+
+def cloud_presence_close(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("presence close body must be an object")
+    lease_id = str(payload.get("lease_id") or "").strip()
+    if not lease_id:
+        raise ValueError("presence close requires lease_id")
+    runtime = _cloud_runtime()
+    return runtime["client"].presence_close(lease_id), 200
+
+
 def _cloud_route_guard(action, *args):
     """Run one cloud POST action at the route boundary (spec §15.12).
 
@@ -8406,6 +8441,46 @@ function toastCtx(name, msg, ok){
    dlgCaseSync() which re-renders when the case's signature changes and
    closes the modal if the case was deleted. */
 var CASE_MODAL={id:'',sig:'',live:false,origin:''};
+var CLOUD_PRESENCE={entity:'',id:'',leaseId:'',timer:null,peers:[]};
+function presencePaint(peers){
+  CLOUD_PRESENCE.peers=Array.isArray(peers)?peers:[];
+  var el=document.getElementById('case-presence');
+  if(!el)return;
+  if(!CLOUD_PRESENCE.peers.length){el.hidden=true;el.innerHTML='';return;}
+  var names=CLOUD_PRESENCE.peers.slice(0,3).map(function(p){
+    return esc(p.display_name||'همکار دیگر');
+  }).join('، ');
+  var extra=CLOUD_PRESENCE.peers.length>3?' و '+fa(CLOUD_PRESENCE.peers.length-3)+' نفر دیگر':'';
+  el.hidden=false;
+  el.innerHTML=ICONS.info+'<div><b>'+names+extra+' هم‌زمان این پرونده را باز کرده‌اند.</b>'
+    +'<div class="cloud-banner-p">این فقط هشدار حضور است؛ ویرایش قفل نمی‌شود. اگر دو نفر هم‌زمان ذخیره کنند، کنترل نسخه و حل تداخل سرور تعیین‌کننده است.</div></div>';
+}
+function presenceBeat(){
+  if(!CASE_MODAL.live||CASE_MODAL.id!==CLOUD_PRESENCE.id)return;
+  api('/cloud-presence',{entity:CLOUD_PRESENCE.entity,entity_id:CLOUD_PRESENCE.id,
+      lease_id:CLOUD_PRESENCE.leaseId||''}).then(function(r){
+    if(!CASE_MODAL.live||CASE_MODAL.id!==CLOUD_PRESENCE.id)return;
+    CLOUD_PRESENCE.leaseId=String(r.lease_id||'');
+    presencePaint(r.peers||[]);
+  }).catch(function(){presencePaint([]);});
+}
+function presenceStart(entity,id){
+  entity=String(entity||'');id=String(id||'');
+  if(CLOUD_PRESENCE.entity!==entity||CLOUD_PRESENCE.id!==id){
+    presenceStop(true);
+    CLOUD_PRESENCE.entity=entity;CLOUD_PRESENCE.id=id;
+  }
+  presenceBeat();
+  if(!CLOUD_PRESENCE.timer)
+    CLOUD_PRESENCE.timer=setInterval(presenceBeat,15000);
+}
+function presenceStop(closeRemote){
+  var lease=CLOUD_PRESENCE.leaseId;
+  if(CLOUD_PRESENCE.timer){clearInterval(CLOUD_PRESENCE.timer);CLOUD_PRESENCE.timer=null;}
+  CLOUD_PRESENCE.entity='';CLOUD_PRESENCE.id='';CLOUD_PRESENCE.leaseId='';CLOUD_PRESENCE.peers=[];
+  if(closeRemote&&lease)
+    api('/cloud-presence-close',{lease_id:lease}).catch(function(){});
+}
 function dlgCaseSig(d){
   var e=d.estelam||{},p=d.pay||{};
   var o=(STATE.owners||[]).find(x=>x.id===d.owner_id)||{};
@@ -8462,7 +8537,9 @@ function closeDlg(){
      also consumes DLG_BACK so dismissed child dialogs return to their
      case or period — unless the dialog being closed IS that own modal. */
   ibtnClearBusy();
+  var closingLiveCase=CASE_MODAL.live;
   var back=DLG_BACK;DLG_BACK='';
+  if(closingLiveCase)presenceStop(true);
   var self=(CASE_MODAL.live&&CASE_MODAL.id===back)
         ||(PER.live&&('per:'+PER.pid)===back);
   /* v1.8.1: a case modal is about to be restored, so its origin has to survive
@@ -8489,6 +8566,7 @@ document.getElementById('dlg').addEventListener('cancel',function(e){
    already open and must be left alone). */
 document.getElementById('dlg').addEventListener('close',function(){
   if(this.open)return;
+  if(CASE_MODAL.live)presenceStop(true);
   CASE_MODAL.id='';CASE_MODAL.sig='';CASE_MODAL.live=false;CASE_MODAL.origin='';
   PER.live=false;
   document.body.appendChild(document.getElementById('toasts'));
@@ -10113,6 +10191,7 @@ function caseDetail(id, silent){
     +'<h3 style="margin:0;padding:0">'+esc(d.name)+'</h3>'
     +'<span class="pill '+(STAGE_TONE[st]||'n')+'">'+(STAGE_FA[st]||esc(st))+'</span>'
     +'<span class="chip kbd">'+esc(d.id)+'</span></div>'
+    +'<div id="case-presence" class="cloud-notice" role="status" hidden></div>'
     +'<div style="margin:14px 0 6px">'+railHtml(d)+'</div>'
     +(nextHtml?'<div class="nextcard">'+nextHtml+'</div>':'')
     +'<div class="dlg-lbl">مسافر</div>'
@@ -10159,6 +10238,7 @@ function caseDetail(id, silent){
      rebuild that dropped it would strand the operator (openDlg armed the
      self-return only, so this must come after it). */
   CASE_MODAL.origin=origin;DLG_BACK=origin;
+  presenceStart('crm_devices',id);
 }
 /* v1.5 B10: manual re-send of the registration handoff (case detail modal).
    The route re-checks stage/destination/passport server-side; a failed send
@@ -14057,6 +14137,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json(*_cloud_route_guard(cloud_logout))
         elif self.path in ("/cloud-sync", "/cloud-sync-now"):  # self.path == "/cloud-sync"
             self._json(*_cloud_route_guard(cloud_sync_now))
+        elif self.path == "/cloud-presence":
+            self._json(*_cloud_route_guard(cloud_presence_heartbeat,
+                                           self._read_json()))
+        elif self.path == "/cloud-presence-close":
+            self._json(*_cloud_route_guard(cloud_presence_close,
+                                           self._read_json()))
         elif self.path == "/cloud-resolve-conflict":
             resp, status = _cloud_route_guard(cloud_resolve_conflict,
                                               self._read_json())
