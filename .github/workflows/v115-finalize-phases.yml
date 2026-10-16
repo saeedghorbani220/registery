@@ -46,11 +46,11 @@ jobs:
           php -l host/src/Presence.php
           php -l host/public/index.php
           python lab/scripts/run_panel_tests.py test_server_crm_v2_presence_client
-      - name: Commit generated implementation
+      - name: Commit generated product implementation
         run: |
           git config user.name "saeedghorbani220"
           git config user.email "saeedghorbani220@gmail.com"
-          git add .github/workflows/server-crm-v2.yml RELEASE_NOTES_v1.15.0.md \
+          git add RELEASE_NOTES_v1.15.0.md \
             host/src/Presence.php host/public/index.php cloud_sync/client.py panel.py \
             lab/tests/test_server_crm_v2_presence.py lab/tests/test_server_crm_v2_presence_client.py
           if git diff --cached --quiet; then
