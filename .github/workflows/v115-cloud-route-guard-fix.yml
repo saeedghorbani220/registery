@@ -1,0 +1,72 @@
+name: v115-cloud-route-guard-fix
+
+on:
+  push:
+    branches:
+      - work/v115-finalize-phases
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-verify:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Align presence routes with existing guarded response pattern
+        shell: python
+        run: |
+          from pathlib import Path
+          p=Path('panel.py')
+          s=p.read_text(encoding='utf-8')
+          replacements={
+          '''        elif self.path == "/cloud-presence":
+              self._json(*_cloud_route_guard(cloud_presence_heartbeat,
+                                             self._read_json()))
+          ''': '''        elif self.path == "/cloud-presence":
+              resp, status = _cloud_route_guard(cloud_presence_heartbeat,
+                                                self._read_json())
+              self._json(resp, status)
+          ''',
+          '''        elif self.path == "/cloud-presence-close":
+              self._json(*_cloud_route_guard(cloud_presence_close,
+                                             self._read_json()))
+          ''': '''        elif self.path == "/cloud-presence-close":
+              resp, status = _cloud_route_guard(cloud_presence_close,
+                                                self._read_json())
+              self._json(resp, status)
+          ''',
+          }
+          changed=False
+          for old,new in replacements.items():
+              if old in s:
+                  s=s.replace(old,new,1); changed=True
+              elif new not in s:
+                  raise SystemExit('presence route anchor changed')
+          if changed:
+              p.write_text(s,encoding='utf-8')
+      - name: Verify cloud UI and presence contracts
+        run: >-
+          python lab/scripts/run_panel_tests.py
+          test_cloud_ui
+          test_server_crm_v2_presence_client
+          test_server_crm_v2_release_gate
+      - name: Commit product fix only
+        shell: bash
+        run: |
+          git config user.name "saeedghorbani220"
+          git config user.email "saeedghorbani220@gmail.com"
+          git add panel.py
+          if git diff --cached --quiet; then
+            echo "No product change needed"
+          else
+            git commit -m "fix: keep presence routes inside guarded cloud contract"
+            git push origin HEAD:work/v115-finalize-phases
+          fi
