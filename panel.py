@@ -1331,6 +1331,8 @@ CLOUD_ERROR_MESSAGES = {
     "DATASET_NOT_EMPTY": "داده‌های میزبان خالی نیست؛ امکان انتقال مجدد وجود ندارد.",
     "IMPORT_CONFLICT": "شناسه یا محتوای انتقال با نسخه قبلی همخوانی ندارد.",
     "REMOTE_NOT_READY": "سرور ابری هنوز آماده نیست یا پرونده‌ها به آن منتقل نشده‌اند.",
+    "BOOTSTRAP_REQUIRED": "ابتدا همگام‌سازی اولیه با سرور باید کامل شود",
+    "DATASET_EPOCH_MISMATCH": "نسخهٔ دیتابیس سرور با کش این سیستم متفاوت است؛ همگام‌سازی برای جلوگیری از بازنویسی متوقف شد",
 }
 
 #: A code that fits the grammar but is unknown to this build: still generic
@@ -1511,6 +1513,7 @@ def _cloud_status_shell(**overrides):
         "api_base": "",
         "tenant_id": "",
         "device_enrolled": False,
+        "device_id": "",
         "last_sync": None,
         "pending": 0,
         "conflicts": 0,
@@ -1578,6 +1581,7 @@ def cloud_status_payload(runtime=None):
         api_base=(getattr(config, "api_base", "") or ""),
         tenant_id=(getattr(config, "tenant_id", "") or ""),
         device_enrolled=bool(getattr(config, "sync_device_id", None)),
+        device_id=(getattr(config, "sync_device_id", "") or ""),
         last_sync=getattr(machine, "last_successful_sync", None),
         pending=pending,
         conflicts=conflicts,
@@ -1693,10 +1697,11 @@ def cloud_login(username, password):
     _CLOUD_MUST_CHANGE = bool(payload.get("must_change_password"))
     user_info = payload.get("user") if isinstance(payload, dict) else None
     _CLOUD_ROLE = user_info.get("role") if isinstance(user_info, dict) else None
-    if not runtime["config"].sync_device_id:
-        # Enrolment needs the live user access token login just minted, so
-        # this is the only place it can happen (spec §5). enroll() persists
-        # the device id and the DPAPI-protected refresh token itself.
+    if (not runtime["config"].sync_device_id
+            or not client.vault.has_device_credentials):
+        # A stale device id is not proof that this PC can authenticate. If
+        # refresh rejection removed the protected credential, a successful
+        # user login self-enrols a replacement machine identity explicitly.
         client.enroll()
     _cloud_apply_login_event(runtime)
     cloud_worker_start()
@@ -1828,6 +1833,19 @@ def cloud_worker_beat():
             return _cloud_note_beat(skipped="awaiting_login")
         if lease.is_expired():
             return _cloud_stop_for_lease(runtime)
+        # A fresh/legacy client must materialize server authority before
+        # the outbox is allowed to send its first mutation. This also repairs
+        # old configs that had a cursor but pre-date dataset_epoch tracking.
+        pull_result = None
+        if (getattr(runtime["config"], "sync_device_id", None)
+                and getattr(runtime["config"], "dataset_epoch", None) is None):
+            try:
+                pull_result = cloud_pull_step(runtime)
+            except CloudSyncError as exc:
+                return _cloud_note_beat(code=exc.code)
+            if pull_result.get("skipped"):
+                return _cloud_note_beat(skipped=pull_result.get("skipped"))
+
         worker = runtime["worker"]
         previous = worker.bind_auth()
         try:
@@ -1836,8 +1854,8 @@ def cloud_worker_beat():
             worker.unbind_auth(previous)
         _cloud_save_machine(runtime)
 
-        pull_result = None
-        if (getattr(runtime["config"], "sync_device_id", None)
+        if (pull_result is None
+                and getattr(runtime["config"], "sync_device_id", None)
                 and hasattr(runtime.get("client"), "pull_all")
                 and not lease.is_expired()
                 and getattr(outcome, "code", None) not in _CLOUD_AUTH_CODES
@@ -2064,7 +2082,7 @@ def _cloud_dirty_set(outbox):
     return dirty
 
 
-def _cloud_enqueue_mutation(entity, legacy_id, record=None, kind="upsert"):
+def _cloud_enqueue_mutation(entity, legacy_id, record=None, kind="upsert", transport=None):
     """Enqueue a local CRM mutation into the cloud outbox (spec §9).
 
     Never raises: offline or unconfigured states leave local operations untouched.
@@ -2117,6 +2135,8 @@ def _cloud_enqueue_mutation(entity, legacy_id, record=None, kind="upsert"):
             "base_version": base_ver,
             "record": wire_record,
         }
+        if transport:
+            op["transport"] = str(transport)
         outbox.enqueue(op)
         cloud_worker_kick()
     except Exception:
@@ -2156,7 +2176,7 @@ def cloud_pull_step(runtime=None):
 
     pulled_pages = 0
     with crm_mod.STORE_LOCK:
-        if getattr(config, "cursor", 0) == 0:
+        if getattr(config, "dataset_epoch", None) is None:
             snapshot = client.bootstrap()
             try:
                 apply.apply_snapshot(
@@ -2168,7 +2188,12 @@ def cloud_pull_step(runtime=None):
                 )
             except RemoteNotReadyError:
                 return {"pulled": 0, "skipped": "remote_not_ready"}
+            # Cross-file commit order is deliberate: local CRM bytes first
+            # (inside apply_snapshot), then row versions, and only then the
+            # cursor/epoch marker. A crash can cause a harmless re-bootstrap,
+            # but can never make a restart skip an unapplied snapshot.
             _save_cloud_versions(versions, versions_path)
+            client.commit_bootstrap(snapshot)
             pulled_pages = 1
         else:
             def _handler(page):
@@ -5632,12 +5657,16 @@ function cloudShellHtml(){
       '<span class="cloud-actor" id="cloud-actor">'+ICON.user+'<span>کاربر فعال:</span><b id="cloud-actor-name"></b></span>'+
     '</div>'+
     '<div class="cloud-facts">'+
+      '<div class="cloud-fact"><span class="cloud-fact-l">این دستگاه</span><span class="cloud-fact-v cloud-code" id="cloud-device">ثبت‌نشده</span></div>'+
       '<div class="cloud-fact"><span class="cloud-fact-l">آخرین همگام‌سازی موفق</span><span class="cloud-fact-v" id="cloud-last-sync">—</span></div>'+
       '<div class="cloud-fact"><span class="cloud-fact-l">تغییرات در انتظار</span><span class="cloud-fact-v" id="cloud-pending">۰</span></div>'+
       '<div class="cloud-fact"><span class="cloud-fact-l">تداخل‌ها</span><span class="cloud-fact-v" id="cloud-conflicts">۰</span></div>'+
       '<div class="cloud-fact"><span class="cloud-fact-l">کد آخرین خطا</span><span class="cloud-fact-v cloud-code" id="cloud-error-code">—</span></div>'+
     '</div>'+
     '<div class="cloud-error" id="cloud-error-line" role="alert">'+ICON.alert+'<span id="cloud-error-text"></span></div>'+
+    '<div class="cloud-notice" id="cloud-reconnect" role="status">'+ICON.info+
+      '<div><span class="cloud-banner-b">اتصال این دستگاه نیاز به بازسازی دارد</span>'+
+      '<p class="cloud-banner-p" id="cloud-reconnect-text"></p></div></div>'+
     '<div class="cloud-status" id="cloud-beat-line" role="status"></div>'+
     '<div class="cloud-status" id="cloud-action-status" role="status" aria-live="polite"></div>'+
     '<div class="cloud-actions">'+
@@ -5686,6 +5715,10 @@ function paintCloud(){
   var name=s&&s.actor?String(s.actor):'';
   document.getElementById('cloud-actor').classList.toggle('on',Boolean(name));
   document.getElementById('cloud-actor-name').textContent=name;
+  var deviceId=s&&s.device_id?String(s.device_id):'';
+  var deviceText=deviceId?(deviceId.length>12?deviceId.slice(0,8)+'…'+deviceId.slice(-4):deviceId):'ثبت‌نشده';
+  document.getElementById('cloud-device').textContent=deviceText;
+  document.getElementById('cloud-device').title=deviceId;
   document.getElementById('cloud-last-sync').textContent=(s&&s.last_sync)?faDateTime(s.last_sync):'—';
   document.getElementById('cloud-pending').textContent=toFa(s?Number(s.pending||0):0);
   document.getElementById('cloud-conflicts').textContent=toFa(s?Number(s.conflicts||0):0);
@@ -5693,6 +5726,19 @@ function paintCloud(){
   var msg=(s&&s.error_message)?String(s.error_message):'';
   document.getElementById('cloud-error-line').classList.toggle('on',Boolean(msg));
   document.getElementById('cloud-error-text').textContent=msg;
+  var reconnect=document.getElementById('cloud-reconnect');
+  var reconnectText=document.getElementById('cloud-reconnect-text');
+  var needsReconnect=Boolean(s&&['not_enrolled','auth_required','read_only'].indexOf(s.link)>=0);
+  if(reconnect)reconnect.classList.toggle('on',needsReconnect);
+  if(reconnectText){
+    if(needsReconnect){
+      reconnectText.textContent=s.link==='not_enrolled'
+        ?'با نام کاربری و رمز عبور میزبان وارد شوید؛ این رایانه با شناسه‌ی مستقل ثبت می‌شود.'
+        :(s.link==='read_only'
+          ?'مهلت آفلاین تمام شده است؛ برای تازه‌سازی مجوز این رایانه دوباره وارد میزبان شوید.'
+          :'نشست ابری قابل استفاده نیست؛ دوباره وارد میزبان شوید. اگر اعتبار دستگاه لغو شده یا از دست رفته باشد، ورود موفق یک شناسه‌ی دستگاه تازه ثبت می‌کند.');
+    }else{reconnectText.textContent='';}
+  }
   document.getElementById('cloud-beat-line').textContent=cloudBeatLine(s);
   document.getElementById('cloud-login-block').classList.toggle('hidden',Boolean(name));
   document.getElementById('cloud-logout-btn').classList.toggle('hidden',!Boolean(name));
@@ -10917,12 +10963,16 @@ function cloudTabHtml(){
         '<div><span class="cloud-banner-b">رمز عبور باید تغییر کند</span>'+
         '<p class="cloud-banner-p">برای ادامه، رمز عبور حساب خود در سرور را تغییر دهید.</p></div></div>'+
       '<div class="cloud-facts">'+
-        '<div class="cloud-fact"><span class="cloud-fact-l">آخرین همگام‌سازی موفق</span><span class="cloud-fact-v" id="cloud-last-sync">—</span></div>'+
+        '<div class="cloud-fact"><span class="cloud-fact-l">این دستگاه</span><span class="cloud-fact-v cloud-code" id="cloud-device">ثبت‌نشده</span></div>'+
+      '<div class="cloud-fact"><span class="cloud-fact-l">آخرین همگام‌سازی موفق</span><span class="cloud-fact-v" id="cloud-last-sync">—</span></div>'+
         '<div class="cloud-fact"><span class="cloud-fact-l">تغییرات در صف ارسال</span><span class="cloud-fact-v" id="cloud-pending">۰</span></div>'+
         '<div class="cloud-fact"><span class="cloud-fact-l">تداخل‌های نیازمند بررسی</span><span class="cloud-fact-v" id="cloud-conflicts">۰</span></div>'+
         '<div class="cloud-fact"><span class="cloud-fact-l">کد آخرین خطا</span><span class="cloud-fact-v cloud-code" id="cloud-error-code">—</span></div>'+
       '</div>'+
       '<div class="cloud-error" id="cloud-error-line" role="alert">'+CLOUD_ICONS.alert+'<span id="cloud-error-text"></span></div>'+
+      '<div class="cloud-notice" id="cloud-reconnect" role="status">'+CLOUD_ICONS.info+
+        '<div><span class="cloud-banner-b">اتصال این دستگاه نیاز به بازسازی دارد</span>'+
+        '<p class="cloud-banner-p" id="cloud-reconnect-text"></p></div></div>'+
       '<div class="cloud-status" id="cloud-beat-line" role="status"></div>'+
       '<div class="cloud-status" id="cloud-action-status" role="status" aria-live="polite"></div>'+
       '<div class="cloud-actions">'+
@@ -11030,6 +11080,10 @@ function paintCloud(){
   if(actorEl)actorEl.classList.toggle('on',Boolean(name));
   var actorName=document.getElementById('cloud-actor-name');
   if(actorName)actorName.textContent=name;
+  var deviceId=s&&s.device_id?String(s.device_id):'';
+  var deviceText=deviceId?(deviceId.length>12?deviceId.slice(0,8)+'…'+deviceId.slice(-4):deviceId):'ثبت‌نشده';
+  var deviceEl=document.getElementById('cloud-device');
+  if(deviceEl){deviceEl.textContent=deviceText;deviceEl.title=deviceId;}
   var lastSync=document.getElementById('cloud-last-sync');
   if(lastSync)lastSync.textContent=(s&&s.last_sync)?faDateTime(s.last_sync):'—';
   var pending=document.getElementById('cloud-pending');
@@ -11043,6 +11097,19 @@ function paintCloud(){
   if(errLine)errLine.classList.toggle('on',Boolean(msg));
   var errText=document.getElementById('cloud-error-text');
   if(errText)errText.textContent=msg;
+  var reconnect=document.getElementById('cloud-reconnect');
+  var reconnectText=document.getElementById('cloud-reconnect-text');
+  var needsReconnect=Boolean(s&&['not_enrolled','auth_required','read_only'].indexOf(s.link)>=0);
+  if(reconnect)reconnect.classList.toggle('on',needsReconnect);
+  if(reconnectText){
+    if(needsReconnect){
+      reconnectText.textContent=s.link==='not_enrolled'
+        ?'با نام کاربری و رمز عبور میزبان وارد شوید؛ این رایانه با شناسه‌ی مستقل ثبت می‌شود.'
+        :(s.link==='read_only'
+          ?'مهلت آفلاین تمام شده است؛ برای تازه‌سازی مجوز این رایانه دوباره وارد میزبان شوید.'
+          :'نشست ابری قابل استفاده نیست؛ دوباره وارد میزبان شوید. اگر اعتبار دستگاه لغو شده یا از دست رفته باشد، ورود موفق یک شناسه‌ی دستگاه تازه ثبت می‌کند.');
+    }else{reconnectText.textContent='';}
+  }
   var beatLine=document.getElementById('cloud-beat-line');
   if(beatLine)beatLine.textContent=cloudBeatLine(s);
   var loginBlock=document.getElementById('cloud-login-block');
@@ -12821,12 +12888,18 @@ class Handler(BaseHTTPRequestHandler):
                     if txs:
                         seq = len(txs) - 1
                         tx_rec = {**txs[-1], "seq": seq, "customer_id": record.get("id")}
-                        _cloud_enqueue_mutation("customer_transactions", f"{record.get('id')}/{seq}", tx_rec)
+                        _cloud_enqueue_mutation(
+                            "customer_transactions",
+                            f"{record.get('id')}/{seq}", tx_rec,
+                            transport="finance_append")
                 elif action == "void_tx" and isinstance(record, dict):
                     txs = record.get("transactions", [])
                     if 0 <= tx_index < len(txs):
                         tx_rec = {**txs[tx_index], "seq": tx_index, "customer_id": record.get("id")}
-                        _cloud_enqueue_mutation("customer_transactions", f"{record.get('id')}/{tx_index}", tx_rec)
+                        _cloud_enqueue_mutation(
+                            "customer_transactions",
+                            f"{record.get('id')}/{tx_index}", tx_rec,
+                            transport="finance_void")
             elif entity == "owner":
                 if action in ("add", "update") and isinstance(record, dict):
                     _cloud_enqueue_mutation("owners", record.get("id"), record)

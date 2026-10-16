@@ -294,6 +294,18 @@ class EndToEndSyncCycleTest(unittest.TestCase):
             "versions": {},
         }
 
+    def _bootstrap_authority(self, client_state):
+        """Materialize then commit the host snapshot before incremental IO."""
+        snapshot = client_state["client"].bootstrap()
+        apply.apply_snapshot(
+            snapshot,
+            store=client_state["store"],
+            versions=client_state["versions"],
+            source_installation_id=client_state["install"],
+        )
+        client_state["client"].commit_bootstrap(snapshot)
+        return snapshot
+
     def test_client_login_and_enroll(self):
         """Client authenticates against host API and enrolls sync device."""
         c = self._create_client("inst1")
@@ -320,6 +332,8 @@ class EndToEndSyncCycleTest(unittest.TestCase):
         cA["client"].enroll()
         cB["client"].login(fake_api.FAKE_USERNAME, fake_api.FAKE_PASSWORD)
         cB["client"].enroll()
+        self._bootstrap_authority(cA)
+        self._bootstrap_authority(cB)
 
         # Client A adds an owner
         owner = {
@@ -370,6 +384,8 @@ class EndToEndSyncCycleTest(unittest.TestCase):
         cA["client"].enroll()
         cB["client"].login(fake_api.FAKE_USERNAME, fake_api.FAKE_PASSWORD)
         cB["client"].enroll()
+        self._bootstrap_authority(cA)
+        self._bootstrap_authority(cB)
 
         # Seed initial owner
         owner = {
@@ -459,6 +475,8 @@ class EndToEndSyncCycleTest(unittest.TestCase):
         cA["client"].enroll()
         cB["client"].login(fake_api.FAKE_USERNAME, fake_api.FAKE_PASSWORD)
         cB["client"].enroll()
+        self._bootstrap_authority(cA)
+        self._bootstrap_authority(cB)
 
         owner = {
             "id": "own2", "first_name": "Seed", "last_name": "Person",

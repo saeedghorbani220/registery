@@ -65,6 +65,11 @@ _COMPACT_LINES = 500
 #: A generous line size; anything larger is corrupt, not a real operation.
 _MAX_LINE_BYTES = 4 * 1024 * 1024
 
+#: Transport marker for a *new* customer ledger append. Updates/voids keep
+#: using generic CAS; only creation needs server-side sequence serialization.
+_FINANCE_APPEND_TRANSPORT = "finance_append"
+_FINANCE_VOID_TRANSPORT = "finance_void"
+
 
 # =====================================================================
 # Retry policy
@@ -685,11 +690,11 @@ class OutboxWorker(object):
             return self._finish(BatchOutcome(
                 refused="START_SYNC", code=TRANSITION_NOT_LEGAL))
 
-        batch = ready[:max_batch or self.max_batch]
+        batch = self._transport_batch(ready, max_batch or self.max_batch)
         outcome = BatchOutcome(attempted=True, batch_size=len(batch))
         failure = None
         try:
-            result = self.client.push([e.operation for e in batch])
+            result = self._push_batch(batch)
         except AuthRequiredError as exc:
             outcome = self._fail_auth(outcome, exc)
         except LeaseExpiredError:
@@ -708,6 +713,112 @@ class OutboxWorker(object):
         if failure is not None:
             raise failure
         return outcome
+
+    # -- transport routing ----------------------------------------------
+    @staticmethod
+    def _finance_transport(entry):
+        operation = getattr(entry, "operation", None)
+        if not isinstance(operation, dict):
+            return None
+        marker = operation.get("transport")
+        if marker in (_FINANCE_APPEND_TRANSPORT, _FINANCE_VOID_TRANSPORT):
+            return marker
+        return None
+
+    @classmethod
+    def _is_finance_special(cls, entry):
+        return cls._finance_transport(entry) is not None
+
+    def _transport_batch(self, ready, limit):
+        """Preserve queue order while isolating serialized finance appends.
+
+        If finance is at the head, send exactly that entry. Otherwise send the
+        contiguous generic prefix and stop before the first finance append.
+        This guarantees a newly-created customer reaches the host before its
+        first ledger entry without degrading unrelated generic batching.
+        """
+        bounded = ready[:limit]
+        if not bounded:
+            return []
+        if self._is_finance_special(bounded[0]):
+            return [bounded[0]]
+        prefix = []
+        for entry in bounded:
+            if self._is_finance_special(entry):
+                break
+            prefix.append(entry)
+        return prefix
+
+    def _push_batch(self, batch):
+        if len(batch) == 1:
+            marker = self._finance_transport(batch[0])
+            if marker == _FINANCE_APPEND_TRANSPORT:
+                return self._push_finance_append(batch[0])
+            if marker == _FINANCE_VOID_TRANSPORT:
+                return self._push_finance_void(batch[0])
+        return self.client.push([entry.operation for entry in batch])
+
+    def _push_finance_append(self, entry):
+        operation = entry.operation
+        if operation.get("kind") != "upsert" \
+                or operation.get("entity") != "customer_transactions":
+            raise BadResponseError(code=SERVER_ERROR)
+        record = operation.get("record")
+        if not isinstance(record, dict):
+            raise BadResponseError(code=SERVER_ERROR)
+        customer_id = record.get("customer_id")
+        amount = record.get("amount")
+        if not isinstance(customer_id, str) or not customer_id \
+                or isinstance(amount, bool) or not isinstance(amount, int):
+            raise BadResponseError(code=SERVER_ERROR)
+        note = record.get("note", "")
+        kind = record.get("kind", "")
+        image = record.get("image", "")
+        device_id = record.get("device_id")
+        if not all(isinstance(value, str) for value in (note, kind, image)):
+            raise BadResponseError(code=SERVER_ERROR)
+        if device_id == "":
+            device_id = None
+        if device_id is not None and not isinstance(device_id, str):
+            raise BadResponseError(code=SERVER_ERROR)
+
+        payload = self.client.append_ledger_transaction(
+            customer_id, amount, note=note, kind=kind, image=image,
+            device_id=device_id, operation_id=entry.operation_id)
+        transaction = payload.get("transaction") if isinstance(payload, dict) else None
+        cursor = payload.get("cursor") if isinstance(payload, dict) else None
+        if not isinstance(transaction, dict) \
+                or not isinstance(transaction.get("id"), str) \
+                or not transaction["id"] \
+                or isinstance(cursor, bool) or not isinstance(cursor, int):
+            raise BadResponseError(code=SERVER_ERROR)
+        return _AppliedBatchResult(entry.operation_id, cursor)
+
+    def _push_finance_void(self, entry):
+        operation = entry.operation
+        if operation.get("kind") != "upsert" \
+                or operation.get("entity") != "customer_transactions":
+            raise BadResponseError(code=SERVER_ERROR)
+        transaction_id = operation.get("id")
+        record = operation.get("record")
+        if not isinstance(transaction_id, str) or not transaction_id \
+                or not isinstance(record, dict):
+            raise BadResponseError(code=SERVER_ERROR)
+        reason = record.get("void_reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise BadResponseError(code=SERVER_ERROR)
+        payload = self.client.void_ledger_transaction(
+            transaction_id, reason, operation_id=entry.operation_id)
+        original = payload.get("original") if isinstance(payload, dict) else None
+        reversal = payload.get("reversal") if isinstance(payload, dict) else None
+        cursor = payload.get("cursor") if isinstance(payload, dict) else None
+        if not isinstance(original, dict) or original.get("id") != transaction_id \
+                or not isinstance(reversal, dict) \
+                or not isinstance(reversal.get("id"), str) \
+                or not reversal["id"] \
+                or isinstance(cursor, bool) or not isinstance(cursor, int):
+            raise BadResponseError(code=SERVER_ERROR)
+        return _AppliedBatchResult(entry.operation_id, cursor)
 
     # -- the terminal-event helpers ------------------------------------
     def _finish(self, outcome):
@@ -793,6 +904,17 @@ class OutboxWorker(object):
         outcome.terminal = SyncEvent.SYNC_OK.value
         outcome.retry_at = None
         return outcome
+
+
+class _AppliedBatchResult(object):
+    """Minimal PushResult shape used by the finance transport path."""
+
+    __slots__ = ("applied", "conflicts", "cursor")
+
+    def __init__(self, operation_id, cursor):
+        self.applied = (operation_id,)
+        self.conflicts = ()
+        self.cursor = cursor
 
 
 def _wrap_unexpected(exc):

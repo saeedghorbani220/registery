@@ -235,8 +235,19 @@ class SolverBackendSelectionTests(unittest.TestCase):
         """The release ships no predict.py/model.py; that must select ONNX."""
         for package, marker in (("Hamta-solver", "OnnxHamtaSolver"), ("solver", "OnnxSolver")):
             with self.subTest(package=package), self._live(package) as live:
-                with patch.object(live, "_torch_backend_available", return_value=False):
-                    solver = live.load_solver(device="cpu")
+                # This test is about backend selection, not loading external
+                # model artifacts. The packaged release verifies the real ONNX
+                # weights separately, while clean source checkouts intentionally
+                # contain neither .pt nor .onnx files.
+                fake_module = type(sys)("onnx_solve")
+                fake_solver = type(marker, (), {
+                    "__init__": lambda self, *args, **kwargs: None,
+                })
+                setattr(fake_module, marker, fake_solver)
+                with patch.dict(sys.modules, {"onnx_solve": fake_module}):
+                    with patch.object(live, "_torch_backend_available",
+                                      return_value=False):
+                        solver = live.load_solver(device="cpu")
                 self.assertEqual(type(solver).__name__, marker)
 
     def test_torch_alone_does_not_select_the_torch_backend(self):

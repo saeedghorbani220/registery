@@ -391,7 +391,10 @@ class TabsMarkupTests(unittest.TestCase):
         body = submit.group(0)
         self.assertIn("if(!reason){toast(", body)
         self.assertIn("action:'close_case',reason:reason", body)
-        self.assertIn("confirmDlg('مختومه کردن پرونده'", self.page)
+        # The irreversible close flow now owns a dedicated reason modal; the
+        # legacy generic confirmDlg assertion became stale once that UX shipped.
+        self.assertIn("function closeCaseDialog(id){", self.page)
+        self.assertIn("openDlg('<h3>مختومه کردن پرونده</h3>'", self.page)
 
     def test_rail_and_guide_tolerate_closed(self):
         # 'closed' is off-rail: it must NOT be a numbered rail step and the

@@ -845,10 +845,28 @@ class RejectTests(ApplyCase):
             row = dict(good, **{field: value})
             self.assertRejected(page(row), repr((field, value)))
 
-    def test_duplicate_ids_in_one_page_are_rejected(self):
+    def test_repeated_row_keeps_first_position_but_latest_snapshot(self):
+        first = {"entity": "owners", "id": "same-id", "seq": 1,
+                 "row_version": 2, "record": {"id": "owner01", "name": "old"}}
+        middle = {"entity": "customers", "id": "other-id", "seq": 2,
+                  "row_version": 1, "record": {"id": "cust01"}}
+        repeated = dict(first, seq=3, row_version=3,
+                        record={"id": "owner01", "name": "latest"})
+        parsed = apply._page_changes(
+            page(first, middle, repeated), apply.CHANGES_ROUTE)
+        self.assertEqual(parsed, [
+            ("owners", "same-id", 3, {"id": "owner01", "name": "latest"}),
+            ("customers", "other-id", 1, {"id": "cust01"}),
+        ])
+
+    def test_repeated_current_snapshot_with_same_version_is_collapsed(self):
         row = {"entity": "owners", "id": "same-id", "seq": 1,
-               "row_version": 1, "record": {}}
-        self.assertRejected(page(row, dict(row, seq=2)), "duplicate")
+               "row_version": 3, "record": {"id": "owner01"}}
+        parsed = apply._page_changes(
+            page(row, dict(row, seq=2)), apply.CHANGES_ROUTE)
+        self.assertEqual(parsed, [
+            ("owners", "same-id", 3, {"id": "owner01"}),
+        ])
 
     def test_the_same_id_in_two_entities_is_allowed(self):
         owner = {"entity": "owners", "id": "same-id", "seq": 1,
