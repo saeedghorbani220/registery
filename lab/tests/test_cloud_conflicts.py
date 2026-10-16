@@ -436,8 +436,11 @@ class PullIntegrationTests(unittest.TestCase):
         mock_snapshot.assert_called_once()
 
     def test_pull_step_incremental_when_cursor_positive(self):
+        # A positive cursor only represents an initialized client when the
+        # authoritative dataset epoch has already been committed as well.
         config = _fake_config(api_base="https://api.test", sync_device_id="dev-1",
-                              cursor=10, source_installation_id="inst-1")
+                              cursor=10, dataset_epoch=1,
+                              source_installation_id="inst-1")
         client = MagicMock()
         client.pull_all.return_value = 2
         lease = _FakeLease(granted=time.time())
@@ -485,7 +488,10 @@ class PullIntegrationTests(unittest.TestCase):
         self.assertEqual(beat["code"], "LEASE_EXPIRED")
 
     def test_worker_beat_catches_illegal_transition_by_name(self):
-        config = _fake_config(api_base="https://api.test", sync_device_id="dev-1")
+        # This test targets the state-machine error path, not first bootstrap.
+        # Mark the fake runtime as already bound to an authoritative dataset.
+        config = _fake_config(api_base="https://api.test", sync_device_id="dev-1",
+                              dataset_epoch=1)
         lease = _FakeLease(granted=time.time())
         worker = MagicMock()
         worker.bind_auth.return_value = (None, None)

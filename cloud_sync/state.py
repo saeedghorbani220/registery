@@ -96,7 +96,8 @@ LEASE_EXPIRED_CODE = "LEASE_EXPIRED"
 #: code that fits the format is accepted so a new server code cannot wedge
 #: the panel, and the UI maps what it knows.
 KNOWN_ERROR_CODES = frozenset({
-    "AUTH_EXPIRED", "AUTH_REVOKED", "BAD_PAYLOAD", "HTTP_409", "HTTP_429",
+    "AUTH_EXPIRED", "AUTH_REVOKED", "BAD_PAYLOAD", "BOOTSTRAP_REQUIRED",
+    "DATASET_EPOCH_MISMATCH", "HTTP_409", "HTTP_429",
     "HTTP_500", "IMPORT_REJECTED", LEASE_EXPIRED_CODE, "NET_TIMEOUT",
     "NET_UNREACHABLE", "QUEUE_FULL", "REMOTE_NOT_READY", "SERVER_ERROR",
     "VERSION_CONFLICT",
